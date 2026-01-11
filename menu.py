@@ -1,6 +1,22 @@
 """Экраны меню и проигрыша"""
 import arcade
+import json
+import os
 from constants import SCREEN_WIDTH, SCREEN_HEIGHT
+
+HIGH_SCORE_FILE = "high_score.json"
+
+
+def load_high_score():
+    """Загружает рекорд из файла"""
+    if os.path.exists(HIGH_SCORE_FILE):
+        try:
+            with open(HIGH_SCORE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('high_score', 0)
+        except:
+            return 0
+    return 0
 
 
 class Button:
@@ -59,13 +75,35 @@ class MainMenuView(arcade.View):
         super().__init__()
         arcade.set_background_color((20, 25, 40))
 
-        # Создаем кнопку запуска
-        self.start_button = Button(
-            SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2,
+        # Загружаем рекорд
+        self.high_score = load_high_score()
+
+        # Создаем кнопки выбора сложности
+        button_y_start = SCREEN_HEIGHT // 2 + 40
+        button_spacing = 80
+
+        self.easy_button = Button(
+            SCREEN_WIDTH // 2, button_y_start,
             250, 60,
-            "НАЧАТЬ ИГРУ",
+            "ЛЕГКИЙ",
             (50, 150, 50),
             (70, 200, 70)
+        )
+
+        self.medium_button = Button(
+            SCREEN_WIDTH // 2, button_y_start - button_spacing,
+            250, 60,
+            "СРЕДНИЙ",
+            (150, 150, 50),
+            (200, 200, 70)
+        )
+
+        self.hard_button = Button(
+            SCREEN_WIDTH // 2, button_y_start - button_spacing * 2,
+            250, 60,
+            "СЛОЖНЫЙ",
+            (150, 50, 50),
+            (200, 70, 70)
         )
 
     def on_draw(self):
@@ -83,25 +121,54 @@ class MainMenuView(arcade.View):
 
         # Подзаголовок
         arcade.draw_text(
-            "Управление: Стрелки",
+            "Управление: WASD",
             SCREEN_WIDTH // 2, SCREEN_HEIGHT - 220,
             arcade.color.LIGHT_GRAY, 20,
             anchor_x="center", anchor_y="center"
         )
 
-        # Кнопка
-        self.start_button.draw()
+        # Подзаголовок - выбор сложности
+        arcade.draw_text(
+            "Выберите сложность:",
+            SCREEN_WIDTH // 2, SCREEN_HEIGHT - 260,
+            arcade.color.LIGHT_GRAY, 18,
+            anchor_x="center", anchor_y="center"
+        )
+
+        # Рекорд
+        arcade.draw_text(
+            f"Рекорд: {self.high_score}",
+            SCREEN_WIDTH // 2, SCREEN_HEIGHT - 300,
+            arcade.color.GOLD, 20,
+            anchor_x="center", anchor_y="center",
+            bold=True
+        )
+
+        # Кнопки выбора сложности
+        self.easy_button.draw()
+        self.medium_button.draw()
+        self.hard_button.draw()
 
     def on_mouse_motion(self, x, y, dx, dy):
         """Обработка движения мыши"""
-        self.start_button.is_hovered = self.start_button.contains_point(x, y)
+        self.easy_button.is_hovered = self.easy_button.contains_point(x, y)
+        self.medium_button.is_hovered = self.medium_button.contains_point(x, y)
+        self.hard_button.is_hovered = self.hard_button.contains_point(x, y)
 
     def on_mouse_press(self, x, y, button, modifiers):
         """Обработка нажатия мыши"""
         if button == arcade.MOUSE_BUTTON_LEFT:
-            if self.start_button.contains_point(x, y):
+            if self.easy_button.contains_point(x, y):
                 from game import GameView
-                game_view = GameView()
+                game_view = GameView(difficulty='easy')
+                self.window.show_view(game_view)
+            elif self.medium_button.contains_point(x, y):
+                from game import GameView
+                game_view = GameView(difficulty='medium')
+                self.window.show_view(game_view)
+            elif self.hard_button.contains_point(x, y):
+                from game import GameView
+                game_view = GameView(difficulty='hard')
                 self.window.show_view(game_view)
 
 

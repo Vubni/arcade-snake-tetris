@@ -27,6 +27,8 @@ class Snake:
         self.direction = 1  # Изначально движется вправо
         # Следующее направление (меняется при нажатии клавиш)
         self.next_direction = 1
+        # Очередь направлений для обработки быстро нажатых клавиш
+        self.direction_queue = []
         # Градиентные цвета для змейки (от головы к хвосту)
         self.head_color = (100, 255, 100)  # Яркий зеленый для головы
         self.body_color = (50, 200, 50)    # Средний зеленый для тела
@@ -34,15 +36,30 @@ class Snake:
 
     def change_direction(self, new_direction):
         """
-        Изменяет направление движения змейки
+        Добавляет направление в очередь (для обработки быстро нажатых клавиш)
         new_direction: 0=вверх, 1=вправо, 2=вниз, 3=влево
         """
-        # Нельзя повернуть в противоположную сторону
-        if (self.direction + 2) % 4 != new_direction:
-            self.next_direction = new_direction
+        # Определяем направление, против которого проверяем (последнее в очереди или следующее)
+        if self.direction_queue:
+            # Проверяем против последнего в очереди
+            check_direction = self.direction_queue[-1]
+        else:
+            check_direction = self.next_direction  # Проверяем против следующего направления
 
-    def move(self):
-        """Перемещает змейку в текущем направлении"""
+        # Нельзя повернуть в противоположную сторону
+        if (check_direction + 2) % 4 != new_direction:
+            # Проверяем, что такое направление еще не в очереди (чтобы избежать дубликатов)
+            if not self.direction_queue or self.direction_queue[-1] != new_direction:
+                self.direction_queue.append(new_direction)
+
+    def move(self, grow=False):
+        """Перемещает змейку в текущем направлении
+        grow: если True, змейка растет (не удаляется хвост)
+        """
+        # Берем направление из очереди, если есть, иначе используем текущее
+        if self.direction_queue:
+            self.next_direction = self.direction_queue.pop(0)
+
         self.direction = self.next_direction
 
         # Получаем текущую позицию головы
@@ -60,8 +77,9 @@ class Snake:
 
         # Добавляем новую голову
         self.body.insert(0, new_head)
-        # Удаляем хвост
-        self.body.pop()
+        # Удаляем хвост только если не растем
+        if not grow:
+            self.body.pop()
 
     def get_body(self):
         """Возвращает список позиций тела змейки"""
@@ -89,17 +107,26 @@ class Snake:
         """Проверяет, находится ли змейка в указанной позиции"""
         return (x, y) in self.body
 
+    def cut_body_at_index(self, index):
+        """Обрезает тело змейки, оставляя только части до указанного индекса (не включая)
+        Возвращает количество отрубленных сегментов"""
+        if index <= 0 or index >= len(self.body):
+            return 0
+        removed_count = len(self.body) - index
+        self.body = self.body[:index]
+        return removed_count
+
     def draw(self):
         """Отрисовка змейки с градиентом и эффектами"""
         body_len = len(self.body)
-        
+
         for idx, (x, y) in enumerate(self.body):
             if 0 <= x < GRID_WIDTH and 0 <= y < GRID_HEIGHT:
                 left = MARGIN + x * CELL_SIZE + 2
                 right = MARGIN + (x + 1) * CELL_SIZE - 2
                 bottom = MARGIN + y * CELL_SIZE + 2
                 top = MARGIN + (y + 1) * CELL_SIZE - 2
-                
+
                 if top > bottom:
                     # Градиент цвета от головы к хвосту
                     if idx == 0:  # Голова
@@ -109,26 +136,28 @@ class Snake:
                     else:  # Тело - интерполяция
                         t = idx / max(1, body_len - 1)
                         color = tuple(
-                            int(self.head_color[i] * (1 - t) + self.tail_color[i] * t)
+                            int(self.head_color[i] *
+                                (1 - t) + self.tail_color[i] * t)
                             for i in range(3)
                         )
-                    
+
                     # Рисуем основной блок
                     arcade.draw_lrbt_rectangle_filled(
                         left, right, bottom, top, color
                     )
-                    
+
                     # Светлая обводка сверху и слева
                     rgb = get_rgb(color)
                     light_border = tuple(min(255, c + 60) for c in rgb)
                     arcade.draw_line(left, top, right, top, light_border, 2)
                     arcade.draw_line(left, bottom, left, top, light_border, 2)
-                    
+
                     # Темная обводка снизу и справа (тень)
                     dark_border = tuple(max(0, c - 60) for c in rgb)
-                    arcade.draw_line(left, bottom, right, bottom, dark_border, 2)
+                    arcade.draw_line(left, bottom, right,
+                                     bottom, dark_border, 2)
                     arcade.draw_line(right, bottom, right, top, dark_border, 2)
-                    
+
                     # Глаза на голове
                     if idx == 0:
                         eye_size = 3
@@ -153,6 +182,8 @@ class Snake:
                             eye2_x = right - 8
                             eye_y1 = bottom + eye_offset
                             eye_y2 = bottom + eye_offset
-                        
-                        arcade.draw_circle_filled(eye1_x, eye_y1, eye_size, arcade.color.BLACK)
-                        arcade.draw_circle_filled(eye2_x, eye_y2, eye_size, arcade.color.BLACK)
+
+                        arcade.draw_circle_filled(
+                            eye1_x, eye_y1, eye_size, arcade.color.BLACK)
+                        arcade.draw_circle_filled(
+                            eye2_x, eye_y2, eye_size, arcade.color.BLACK)
