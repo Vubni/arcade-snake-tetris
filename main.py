@@ -2,8 +2,7 @@ import arcade
 import random
 import copy
 
-# Константы игры
-CELL_SIZE = 30  # Размер одной клетки в пикселях
+CELL_SIZE = 30
 GRID_WIDTH = 20  # Ширина поля в клетках (большое поле)
 GRID_HEIGHT = 30  # Высота поля в клетках (большое поле)
 MARGIN = 50  # Отступы от краев окна
@@ -11,18 +10,27 @@ MARGIN = 50  # Отступы от краев окна
 SCREEN_WIDTH = GRID_WIDTH * CELL_SIZE + MARGIN * 2
 SCREEN_HEIGHT = GRID_HEIGHT * CELL_SIZE + MARGIN * 2
 
-# Цвета для фигур
 COLORS = [
-    arcade.color.CYAN,      # I
-    arcade.color.BLUE,      # J
-    arcade.color.ORANGE,    # L
-    arcade.color.YELLOW,    # O
-    arcade.color.GREEN,     # S
-    arcade.color.PURPLE,    # T
-    arcade.color.RED,       # Z
+    (0, 255, 255),      # Яркий циан для I
+    (0, 100, 255),      # Яркий синий для J
+    (255, 140, 0),      # Яркий оранжевый для L
+    (255, 255, 0),      # Яркий желтый для O
+    (50, 205, 50),      # Яркий зеленый для S
+    (186, 85, 211),     # Яркий фиолетовый для T
+    (255, 50, 50),      # Яркий красный для Z
 ]
 
-# Формы тетромино (относительно центра)
+
+def get_rgb(color):
+    """Преобразует цвет arcade в RGB кортеж"""
+    if isinstance(color, tuple):
+        return color[:3] if len(color) >= 3 else (255, 255, 255)
+    try:
+        return (color[0], color[1], color[2]) if hasattr(color, '__getitem__') else (255, 255, 255)
+    except:
+        return (255, 255, 255)
+
+
 TETROMINOES = {
     'I': [(-1, 0), (0, 0), (1, 0), (2, 0)],
     'J': [(-1, -1), (-1, 0), (0, 0), (1, 0)],
@@ -37,27 +45,22 @@ TETROMINOES = {
 class TetrisGame(arcade.Window):
     def __init__(self):
         super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, "Тетрис")
-        arcade.set_background_color(arcade.color.BLACK)
+        arcade.set_background_color((20, 25, 40))
 
-        # Игровое поле (None = пусто, число = цвет)
         self.grid = [[None for _ in range(GRID_WIDTH)]
                      for _ in range(GRID_HEIGHT)]
 
-        # Текущая падающая фигура
         self.current_piece = None
         self.current_piece_type = None
         self.current_piece_color = None
         self.current_piece_x = 0
         self.current_piece_y = 0
 
-        # Таймер для падения
         self.fall_timer = 0.0
         self.fall_speed = 0.5  # секунд до следующего падения
 
-        # Счетчик очков
         self.score = 0
 
-        # Создаем первую фигуру
         self.spawn_new_piece()
 
     def spawn_new_piece(self):
@@ -67,7 +70,6 @@ class TetrisGame(arcade.Window):
         self.current_piece = copy.deepcopy(TETROMINOES[piece_type])
         self.current_piece_color = random.choice(COLORS)
 
-        # Размещаем фигуру в центре верхней части поля
         self.current_piece_x = GRID_WIDTH // 2
         self.current_piece_y = GRID_HEIGHT - 1
 
@@ -86,11 +88,9 @@ class TetrisGame(arcade.Window):
             x = self.current_piece_x + dx + x_offset
             y = self.current_piece_y + dy + y_offset
 
-            # Проверка границ
             if x < 0 or x >= GRID_WIDTH or y < 0:
                 return False
 
-            # Проверка столкновения с уже установленными блоками
             if y < GRID_HEIGHT and self.grid[y][x] is not None:
                 return False
 
@@ -105,13 +105,10 @@ class TetrisGame(arcade.Window):
             if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
                 self.grid[y][x] = self.current_piece_color
 
-        # Проверяем заполненные линии
         self.clear_lines()
 
-        # Создаем новую фигуру
         self.spawn_new_piece()
 
-        # Проверяем, не закончилась ли игра
         if not self.is_valid_position():
             print("Игра окончена! Счет:", self.score)
 
@@ -122,29 +119,24 @@ class TetrisGame(arcade.Window):
 
         while y >= 0:
             if all(self.grid[y][x] is not None for x in range(GRID_WIDTH)):
-                # Удаляем линию
                 del self.grid[y]
-                # Добавляем пустую линию сверху
                 self.grid.append([None for _ in range(GRID_WIDTH)])
                 lines_cleared += 1
             else:
                 y -= 1
 
-        # Начисляем очки
         if lines_cleared > 0:
-            self.score += lines_cleared * 100 * lines_cleared  # Бонус за несколько линий
+            self.score += lines_cleared * 100 * lines_cleared
 
     def rotate_piece(self):
         """Поворачивает фигуру на 90 градусов по часовой стрелке"""
-        if self.current_piece_type == 'O':  # Квадрат не нужно поворачивать
+        if self.current_piece_type == 'O':
             return
 
-        # Поворот: (x, y) -> (y, -x)
         rotated = [(-dy, dx) for dx, dy in self.current_piece]
         old_piece = self.current_piece
         self.current_piece = rotated
 
-        # Проверяем, можно ли повернуть
         if not self.is_valid_position():
             self.current_piece = old_piece
 
@@ -163,9 +155,7 @@ class TetrisGame(arcade.Window):
         if self.fall_timer >= self.fall_speed:
             self.fall_timer = 0.0
 
-            # Пытаемся опустить фигуру
             if not self.move_piece(0, -1):
-                # Если не получилось, фиксируем фигуру
                 self.lock_piece()
 
     def on_key_press(self, key, modifiers):
@@ -180,50 +170,61 @@ class TetrisGame(arcade.Window):
         elif key == arcade.key.UP:
             self.rotate_piece()
         elif key == arcade.key.SPACE:
-            # Мгновенное падение
             while self.move_piece(0, -1):
                 pass
             self.lock_piece()
 
     def draw_grid(self):
         """Отрисовка сетки поля"""
-        # Вертикальные линии
+        field_color = (30, 35, 50)
+        arcade.draw_lrbt_rectangle_filled(
+            MARGIN, MARGIN + GRID_WIDTH * CELL_SIZE,
+            MARGIN, MARGIN + GRID_HEIGHT * CELL_SIZE,
+            field_color
+        )
+
+        grid_color = (60, 70, 90)
         for x in range(GRID_WIDTH + 1):
             start_x = MARGIN + x * CELL_SIZE
             start_y = MARGIN
             end_x = start_x
             end_y = MARGIN + GRID_HEIGHT * CELL_SIZE
             arcade.draw_line(start_x, start_y, end_x,
-                             end_y, arcade.color.GRAY, 1)
+                             end_y, grid_color, 1)
 
-        # Горизонтальные линии
         for y in range(GRID_HEIGHT + 1):
             start_x = MARGIN
             start_y = MARGIN + y * CELL_SIZE
             end_x = MARGIN + GRID_WIDTH * CELL_SIZE
             end_y = start_y
             arcade.draw_line(start_x, start_y, end_x,
-                             end_y, arcade.color.GRAY, 1)
+                             end_y, grid_color, 1)
 
     def draw_blocks(self):
         """Отрисовка всех блоков на поле"""
-        # Установленные блоки
         for y in range(GRID_HEIGHT):
             for x in range(GRID_WIDTH):
                 if self.grid[y][x] is not None:
                     left = MARGIN + x * CELL_SIZE + 1
                     right = MARGIN + (x + 1) * CELL_SIZE - 1
-                    # В arcade координаты идут снизу вверх
-                    # y=0 - нижняя строка, y=GRID_HEIGHT-1 - верхняя строка
                     bottom = MARGIN + y * CELL_SIZE + 1
                     top = MARGIN + (y + 1) * CELL_SIZE - 1
-                    # Убеждаемся, что top > bottom
                     if top > bottom:
                         arcade.draw_lrbt_rectangle_filled(
                             left, right, bottom, top, self.grid[y][x]
                         )
+                        rgb = get_rgb(self.grid[y][x])
+                        border_color = tuple(min(255, c + 50) for c in rgb)
+                        arcade.draw_line(left, top, right,
+                                         top, border_color, 2)
+                        arcade.draw_line(left, bottom, left,
+                                         top, border_color, 2)
+                        shadow_color = tuple(max(0, c - 50) for c in rgb)
+                        arcade.draw_line(left, bottom, right,
+                                         bottom, shadow_color, 2)
+                        arcade.draw_line(right, bottom, right,
+                                         top, shadow_color, 2)
 
-        # Текущая падающая фигура
         if self.current_piece:
             for dx, dy in self.current_piece:
                 x = self.current_piece_x + dx
@@ -234,11 +235,21 @@ class TetrisGame(arcade.Window):
                     right = MARGIN + (x + 1) * CELL_SIZE - 1
                     bottom = MARGIN + y * CELL_SIZE + 1
                     top = MARGIN + (y + 1) * CELL_SIZE - 1
-                    # Убеждаемся, что top > bottom
                     if top > bottom:
                         arcade.draw_lrbt_rectangle_filled(
                             left, right, bottom, top, self.current_piece_color
                         )
+                        rgb = get_rgb(self.current_piece_color)
+                        border_color = tuple(min(255, c + 70) for c in rgb)
+                        shadow_color = tuple(max(0, c - 50) for c in rgb)
+                        arcade.draw_line(left, top, right,
+                                         top, border_color, 2)
+                        arcade.draw_line(left, bottom, left,
+                                         top, border_color, 2)
+                        arcade.draw_line(left, bottom, right,
+                                         bottom, shadow_color, 2)
+                        arcade.draw_line(right, bottom, right,
+                                         top, shadow_color, 2)
 
     def on_draw(self):
         """Отрисовка игры"""
@@ -247,12 +258,10 @@ class TetrisGame(arcade.Window):
         self.draw_grid()
         self.draw_blocks()
 
-        # Отображение счета
         score_text = f"Счет: {self.score}"
         arcade.draw_text(score_text, 10, SCREEN_HEIGHT -
                          30, arcade.color.WHITE, 16)
 
-        # Инструкции
         instructions = [
             "← → : Движение",
             "↑ : Поворот",
