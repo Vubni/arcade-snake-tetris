@@ -3,6 +3,7 @@ import arcade
 import random
 import json
 import os
+import pymunk
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
     MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS
@@ -10,6 +11,9 @@ from constants import (
 from snake import Snake
 from tetromino import Tetromino
 from apple import Apple
+from menu import load_settings
+from particles import ParticleSystem
+from block_sprite import BlockSprite
 
 HIGH_SCORE_FILE = "high_score.json"
 
@@ -52,6 +56,10 @@ class GameView(arcade.View):
         super().__init__()
         arcade.set_background_color((20, 25, 40))
 
+        # Загружаем настройки
+        settings = load_settings()
+        self.camera_follow_snake = settings.get('camera_follow_snake', False)
+
         # Настройки сложности
         self.difficulty = difficulty
         difficulty_config = DIFFICULTY_SETTINGS.get(
@@ -72,8 +80,9 @@ class GameView(arcade.View):
         self.snake = Snake(snake_x, snake_y)
         self.snake_timer = 0.0
 
-        # Яблоко
+        # Яблоко (теперь спрайт)
         self.apple = None
+        self.apple_sprite_list = arcade.SpriteList()
         self.spawn_apple()
 
         self.spawn_new_piece()
@@ -84,6 +93,92 @@ class GameView(arcade.View):
         # Счетчик фигур для постепенного ускорения
         self.pieces_count = 0
         self.base_fall_speed = self.fall_speed  # Сохраняем базовую скорость
+
+        # Система частиц
+        self.particle_system = ParticleSystem()
+        
+        # Спрайты для блоков (для использования методов collide)
+        self.block_sprites = arcade.SpriteList()
+        
+        # Физический движок (pymunk)
+        self.space = pymunk.Space()
+        self.space.gravity = (0, -981)  # Гравитация вниз
+        
+        # Звуки
+        self.sound_eat_apple = None
+        self.sound_line_clear = None
+        self.sound_game_over = None
+        self.sound_background = None
+        self.background_music_player = None
+        self.load_sounds()
+        
+        # Запускаем фоновую музыку
+        if self.sound_background:
+            self.background_music_player = self.sound_background.play(volume=0.3, loop=True)
+
+        # Настройки камеры
+        # Увеличение при следовании за змейкой (меньше = больше область видимости)
+        self.camera_zoom = 1.2
+        # Инициализируем камеру начальной позицией змейки
+        snake_head = self.snake.get_head()
+        self.camera_x = MARGIN + snake_head[0] * CELL_SIZE + CELL_SIZE // 2
+        self.camera_y = MARGIN + snake_head[1] * CELL_SIZE + CELL_SIZE // 2
+        # Создаем камеру для игрового поля
+        self._camera = arcade.Camera2D()
+        # Создаем камеру по умолчанию для UI
+        self._ui_camera = arcade.Camera2D()
+        
+        # Анимация для фигур
+        self.piece_animation_timer = 0.0
+
+    def load_sounds(self):
+        """Загружает звуки игры"""
+        try:
+            # Пытаемся загрузить звуки из встроенных ресурсов arcade
+            sound_paths = {
+                'eat_apple': [
+                    ":resources:sounds/coin1.wav",
+                    ":resources:sounds/coin2.wav",
+                    ":resources:sounds/coin3.wav",
+                    ":resources:sounds/coin4.wav",
+                    ":resources:sounds/coin5.wav",
+                ],
+                'line_clear': [
+                    ":resources:sounds/upgrade1.wav",
+                    ":resources:sounds/upgrade2.wav",
+                    ":resources:sounds/upgrade3.wav",
+                    ":resources:sounds/upgrade4.wav",
+                    ":resources:sounds/upgrade5.wav",
+                ],
+                'game_over': [
+                    ":resources:sounds/gameover1.wav",
+                    ":resources:sounds/gameover2.wav",
+                    ":resources:sounds/gameover3.wav",
+                    ":resources:sounds/gameover4.wav",
+                    ":resources:sounds/gameover5.wav",
+                ],
+                'background': [
+                    ":resources:music/funkyrobot.mp3",
+                    ":resources:music/1918.mp3",
+                ]
+            }
+            
+            for sound_name, paths in sound_paths.items():
+                for path in paths:
+                    try:
+                        if sound_name == 'eat_apple':
+                            self.sound_eat_apple = arcade.load_sound(path)
+                        elif sound_name == 'line_clear':
+                            self.sound_line_clear = arcade.load_sound(path)
+                        elif sound_name == 'game_over':
+                            self.sound_game_over = arcade.load_sound(path)
+                        elif sound_name == 'background':
+                            self.sound_background = arcade.load_sound(path)
+                        break
+                    except:
+                        continue
+        except:
+            pass  # Если звуки не загрузились, продолжаем без них
 
     def find_best_target_row(self):
         """Находит лучший ряд для заполнения (приоритет рядам, близким к завершению)"""
@@ -435,19 +530,23 @@ class GameView(arcade.View):
                 if is_under_piece:
                     continue
 
-            # Нашли свободное место
+            # Нашли свободное место - создаем спрайт яблока
             self.apple = Apple(apple_x, apple_y)
+            self.apple_sprite_list.clear()
+            self.apple_sprite_list.append(self.apple)
 
             # Проверяем доступность яблока (особенно если оно внизу)
             if not self.is_apple_accessible(apple_x, apple_y):
                 # Яблоко недоступно - уничтожаем без снятия очков и создаем новое
                 self.apple = None
+                self.apple_sprite_list.clear()
                 continue
 
             return
 
         # Если не нашли место (очень маловероятно), ставим None
         self.apple = None
+        self.apple_sprite_list.clear()
 
     def is_valid_position(self, piece, x_offset=0, y_offset=0):
         """Проверяет, может ли фигура находиться в указанной позиции"""
@@ -465,7 +564,7 @@ class GameView(arcade.View):
 
     def lock_piece(self):
         """Фиксирует текущую фигуру на поле"""
-        # Проверяем, не раздавили ли яблоко падающей фигурой
+        # Проверяем, не раздавили ли яблоко падающей фигурой (используя collide)
         if self.apple:
             apple_pos = self.apple.get_position()
             piece_positions = self.current_piece.get_positions()
@@ -475,15 +574,28 @@ class GameView(arcade.View):
                 apple_x, apple_y = apple_pos
                 self.score = max(0, self.score - 50)
                 self.add_score_message(-50, apple_x, apple_y)
+                # Частицы при раздавливании яблока
+                pixel_x = MARGIN + apple_x * CELL_SIZE + CELL_SIZE // 2
+                pixel_y = MARGIN + apple_y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_explosion(pixel_x, pixel_y, (255, 0, 0), count=15)
                 self.apple = None
+                self.apple_sprite_list.clear()
                 self.spawn_apple()
 
+        # Создаем спрайты для блоков и добавляем в список для collide
         for dx, dy in self.current_piece.get_shape():
             x = self.current_piece.get_x() + dx
             y = self.current_piece.get_y() + dy
 
             if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
                 self.grid[y][x] = self.current_piece.get_color()
+                # Создаем спрайт блока
+                block_sprite = BlockSprite(x, y, self.current_piece.get_color())
+                self.block_sprites.append(block_sprite)
+                # Анимация появления
+                pixel_x = MARGIN + x * CELL_SIZE + CELL_SIZE // 2
+                pixel_y = MARGIN + y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_explosion(pixel_x, pixel_y, self.current_piece.get_color(), count=5)
 
         self.clear_lines()
 
@@ -504,9 +616,29 @@ class GameView(arcade.View):
         """Удаляет заполненные линии"""
         lines_cleared = 0
         y = GRID_HEIGHT - 1
+        cleared_rows = []
 
         while y >= 0:
             if all(self.grid[y][x] is not None for x in range(GRID_WIDTH)):
+                # Собираем цвет для частиц
+                line_color = self.grid[y][0] if self.grid[y][0] else (255, 255, 255)
+                cleared_rows.append((y, line_color))
+                
+                # Удаляем спрайты блоков этой линии
+                sprites_to_remove = []
+                for sprite in self.block_sprites:
+                    if sprite.grid_y == y:
+                        # Частицы при удалении блока
+                        pixel_x = sprite.center_x
+                        pixel_y = sprite.center_y
+                        self.particle_system.add_line_clear_particles(
+                            pixel_x, pixel_y, line_color, count=3
+                        )
+                        sprites_to_remove.append(sprite)
+                
+                for sprite in sprites_to_remove:
+                    self.block_sprites.remove(sprite)
+                
                 del self.grid[y]
                 self.grid.append([None for _ in range(GRID_WIDTH)])
                 lines_cleared += 1
@@ -518,6 +650,20 @@ class GameView(arcade.View):
             score_gain = lines_cleared * 100
             self.score = max(0, self.score + score_gain)
             self.add_score_message(score_gain)
+            
+            # Звук очистки линии
+            if self.sound_line_clear:
+                arcade.play_sound(self.sound_line_clear, volume=0.5)
+            
+            # Частицы для каждой очищенной линии
+            for row_y, color in cleared_rows:
+                center_x = SCREEN_WIDTH // 2
+                center_y = MARGIN + row_y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_line_clear_particles(center_x, center_y, color, count=20)
+            
+            # Обновляем позиции спрайтов после удаления линий
+            for sprite in self.block_sprites:
+                sprite.center_y = MARGIN + sprite.grid_y * CELL_SIZE + CELL_SIZE // 2
 
     def move_piece(self, dx, dy):
         """Перемещает фигуру"""
@@ -540,7 +686,7 @@ class GameView(arcade.View):
         return False
 
     def check_snake_collision(self):
-        """Проверяет столкновение змейки со стеной, фигурами или с собой (проверяет все части змейки)"""
+        """Проверяет столкновение змейки со стеной, фигурами или с собой (использует методы collide)"""
         snake_body = self.snake.get_body()
 
         # Проверка столкновения головы с телом (столкновение с собой)
@@ -554,10 +700,20 @@ class GameView(arcade.View):
             if snake_x < 0 or snake_x >= GRID_WIDTH or snake_y < 0 or snake_y >= GRID_HEIGHT:
                 return True
 
-            # Проверка столкновения с зафиксированными блоками
+            # Проверка столкновения с зафиксированными блоками (используя collide)
             if 0 <= snake_y < GRID_HEIGHT and 0 <= snake_x < GRID_WIDTH:
                 if self.grid[snake_y][snake_x] is not None:
-                    return True
+                    # Создаем временный спрайт для проверки столкновения
+                    temp_sprite = arcade.Sprite()
+                    temp_sprite.center_x = MARGIN + snake_x * CELL_SIZE + CELL_SIZE // 2
+                    temp_sprite.center_y = MARGIN + snake_y * CELL_SIZE + CELL_SIZE // 2
+                    temp_sprite.width = CELL_SIZE
+                    temp_sprite.height = CELL_SIZE
+                    
+                    # Проверяем столкновение со спрайтами блоков
+                    hit_list = arcade.check_for_collision_with_list(temp_sprite, self.block_sprites)
+                    if hit_list:
+                        return True
 
         # Проверка столкновения с падающей фигурой (отдельно для головы и тела)
         if self.current_piece:
@@ -583,6 +739,10 @@ class GameView(arcade.View):
                         self.score = max(0, self.score - score_loss)
                         # Показываем изменение очков
                         self.add_score_message(-score_loss, snake_x, snake_y)
+                        # Частицы при обрезании
+                        pixel_x = MARGIN + snake_x * CELL_SIZE + CELL_SIZE // 2
+                        pixel_y = MARGIN + snake_y * CELL_SIZE + CELL_SIZE // 2
+                        self.particle_system.add_explosion(pixel_x, pixel_y, (255, 100, 0), count=10)
                     break  # Обрабатываем только первое касание
 
         return False
@@ -612,6 +772,14 @@ class GameView(arcade.View):
 
     def game_over(self):
         """Завершает игру и показывает экран проигрыша"""
+        # Останавливаем фоновую музыку
+        if self.background_music_player:
+            arcade.stop_sound(self.background_music_player)
+        
+        # Звук окончания игры
+        if self.sound_game_over:
+            arcade.play_sound(self.sound_game_over, volume=0.8)
+        
         # Обновляем рекорд, если текущий счёт больше
         high_score = load_high_score()
         if self.score > high_score:
@@ -623,6 +791,38 @@ class GameView(arcade.View):
 
     def on_update(self, delta_time):
         """Обновление игры"""
+        # Обновление физического движка
+        self.space.step(delta_time)
+        
+        # Обновление анимаций
+        self.piece_animation_timer += delta_time
+        
+        # Обновление анимации яблока
+        if self.apple:
+            self.apple.update_animation(delta_time)
+        
+        # Обновление анимаций спрайтов блоков
+        for sprite in self.block_sprites:
+            if hasattr(sprite, 'update_animation'):
+                sprite.update_animation(delta_time)
+        
+        # Обновление системы частиц
+        self.particle_system.update(delta_time)
+        
+        # Обновление камеры (следует за змейкой)
+        if self.camera_follow_snake:
+            snake_head = self.snake.get_head()
+            # Преобразуем координаты змейки в пиксели
+            target_x = MARGIN + snake_head[0] * CELL_SIZE + CELL_SIZE // 2
+            target_y = MARGIN + snake_head[1] * CELL_SIZE + CELL_SIZE // 2
+
+            # Плавное следование камеры (интерполяция)
+            lerp_speed = 5.0  # Скорость следования
+            self.camera_x += (target_x - self.camera_x) * \
+                lerp_speed * delta_time
+            self.camera_y += (target_y - self.camera_y) * \
+                lerp_speed * delta_time
+
         # Обновление сообщений об изменении очков
         for msg in self.score_messages[:]:
             msg['life'] -= delta_time
@@ -678,17 +878,40 @@ class GameView(arcade.View):
             # Двигаем змейку (направление может измениться внутри move)
             self.snake.move(grow=False)
 
-            # Проверяем яблоко ПОСЛЕ движения, используя реальную новую позицию головы
+            # Проверяем яблоко ПОСЛЕ движения, используя реальную новую позицию головы (с помощью collide)
             new_head = self.snake.get_head()
-            if self.apple and new_head == self.apple.get_position():
-                # Яблоко съедено - змейка должна вырасти
-                # Возвращаем удаленный хвост, чтобы змейка выросла
-                if old_tail:
-                    self.snake.body.append(old_tail)
-                apple_x, apple_y = self.apple.get_position()
-                self.score += 100
-                self.add_score_message(100, apple_x, apple_y)
-                self.spawn_apple()
+            if self.apple:
+                # Создаем временный спрайт для проверки столкновения
+                temp_sprite = arcade.Sprite()
+                temp_sprite.center_x = MARGIN + new_head[0] * CELL_SIZE + CELL_SIZE // 2
+                temp_sprite.center_y = MARGIN + new_head[1] * CELL_SIZE + CELL_SIZE // 2
+                temp_sprite.width = CELL_SIZE
+                temp_sprite.height = CELL_SIZE
+                
+                # Проверяем столкновение с яблоком используя collide
+                hit_list = arcade.check_for_collision_with_list(temp_sprite, self.apple_sprite_list)
+                if hit_list:
+                    # Яблоко съедено - змейка должна вырасти
+                    # Возвращаем удаленный хвост, чтобы змейка выросла
+                    if old_tail:
+                        self.snake.body.append(old_tail)
+                    apple_x, apple_y = self.apple.get_position()
+                    self.score += 100
+                    self.add_score_message(100, apple_x, apple_y)
+                    
+                    # Звук съедания яблока
+                    if self.sound_eat_apple:
+                        arcade.play_sound(self.sound_eat_apple, volume=0.7)
+                    
+                    # Частицы при съедании яблока
+                    pixel_x = self.apple.center_x
+                    pixel_y = self.apple.center_y
+                    self.particle_system.add_apple_particles(pixel_x, pixel_y, count=15)
+                    
+                    # Анимация вращения яблока перед исчезновением
+                    self.apple.start_rotation()
+                    
+                    self.spawn_apple()
 
             # Проверяем столкновения
             if self.check_snake_collision():
@@ -792,19 +1015,43 @@ class GameView(arcade.View):
             self.snake.change_direction(3)  # Влево
 
     def draw_apple(self):
-        """Отрисовка яблока"""
+        """Отрисовка яблока (спрайт)"""
         if self.apple:
-            self.apple.draw()
+            self.apple_sprite_list.draw()
 
     def on_draw(self):
         """Отрисовка игры"""
         self.clear()
 
+        # Применяем камеру, если включено следование за змейкой
+        if self.camera_follow_snake:
+            # Устанавливаем позицию камеры (центрируем на змейке)
+            # В arcade Camera2D позиция камеры - это точка в мировых координатах,
+            # которая будет отображаться в центре экрана
+            # camera_x и camera_y уже содержат позицию змейки в пикселях
+            # Просто устанавливаем позицию камеры равной позиции змейки
+            self._camera.position = (self.camera_x, self.camera_y)
+            self._camera.zoom = self.camera_zoom
+
+            # Активируем камеру
+            self._camera.use()
+
         self.draw_grid()
         self.draw_blocks()
+        # Отрисовка спрайтов блоков
+        self.block_sprites.draw()
         self.draw_apple()
         self.snake.draw()
+        
+        # Отрисовка системы частиц
+        self.particle_system.draw()
 
+        # Отключаем камеру для UI элементов - используем камеру по умолчанию
+        if self.camera_follow_snake:
+            # Возвращаемся к обычному виду через UI камеру
+            self._ui_camera.use()
+
+        # UI элементы отрисовываются без трансформации камеры
         score_text = f"Счет: {self.score}"
         arcade.draw_text(score_text, 10, SCREEN_HEIGHT -
                          30, arcade.color.WHITE, 16)
