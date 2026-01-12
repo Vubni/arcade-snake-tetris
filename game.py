@@ -86,20 +86,44 @@ class GameView(arcade.View):
         self.base_fall_speed = self.fall_speed  # Сохраняем базовую скорость
 
     def find_best_target_row(self):
-        """Находит лучший ряд для заполнения (самый заполненный, но не полностью)"""
+        """Находит лучший ряд для заполнения (приоритет рядам, близким к завершению)"""
         best_row = -1
-        max_filled = 0
+        best_score = -1
 
         # Анализируем нижние 15 рядов (игровую зону)
         for y in range(max(0, GRID_HEIGHT - 15), GRID_HEIGHT):
             filled_count = sum(1 for x in range(GRID_WIDTH)
                                if self.grid[y][x] is not None)
-            # Ищем ряд с максимальным заполнением, но не полностью заполненный
-            if filled_count > max_filled and filled_count < GRID_WIDTH:
-                max_filled = filled_count
-                best_row = y
 
-        return best_row, max_filled
+            # Пропускаем полностью заполненные ряды
+            if filled_count >= GRID_WIDTH:
+                continue
+
+            # Вычисляем "ценность" ряда: чем больше заполнен и чем ниже, тем лучше
+            # Приоритет рядам, которые заполнены на 50% и более
+            fill_ratio = filled_count / GRID_WIDTH
+            height_bonus = (GRID_HEIGHT - y) / \
+                GRID_HEIGHT  # Нижние ряды важнее
+
+            # Оценка: приоритет рядам с заполнением 40-95%
+            if fill_ratio >= 0.4:
+                score = fill_ratio * 100 + height_bonus * 20
+                # Дополнительный бонус за ряды, близкие к завершению (80%+)
+                if fill_ratio >= 0.8:
+                    score += 30
+                if score > best_score:
+                    best_score = score
+                    best_row = y
+                    max_filled = filled_count
+            elif filled_count > 0:
+                # Для рядов с меньшим заполнением используем меньший приоритет
+                score = fill_ratio * 50 + height_bonus * 10
+                if score > best_score and best_row == -1:
+                    best_score = score
+                    best_row = y
+                    max_filled = filled_count
+
+        return best_row, max_filled if best_row >= 0 else 0
 
     def find_best_position_for_piece(self, piece, target_row):
         """Находит лучшую позицию X для фигуры, чтобы заполнить пробелы в целевом ряду"""
@@ -115,45 +139,77 @@ class GameView(arcade.View):
         if not gaps:
             return piece.get_x()
 
-        # Находим самый большой последовательный пробел
-        gap_start = gaps[0]
-        gap_end = gaps[0]
-        best_gap_start = gaps[0]
-        best_gap_length = 1
-
-        for i in range(1, len(gaps)):
-            if gaps[i] == gaps[i-1] + 1:
-                gap_end = gaps[i]
-            else:
-                if gap_end - gap_start + 1 > best_gap_length:
-                    best_gap_length = gap_end - gap_start + 1
-                    best_gap_start = gap_start
-                gap_start = gaps[i]
-                gap_end = gaps[i]
-
-        if gap_end - gap_start + 1 > best_gap_length:
-            best_gap_length = gap_end - gap_start + 1
-            best_gap_start = gap_start
-
-        # Вычисляем реальные X координаты фигуры
+        # Анализируем форму фигуры
         shape = piece.get_shape()
         current_x = piece.get_x()
+
+        # Находим ширину фигуры по X
         piece_x_positions = [current_x + dx for dx, dy in shape]
         min_piece_x = min(piece_x_positions)
         max_piece_x = max(piece_x_positions)
+        piece_width = max_piece_x - min_piece_x + 1
         piece_center_x = (min_piece_x + max_piece_x) / 2
 
-        # Центр пробела
-        gap_center = best_gap_start + best_gap_length / 2
+        # Находим все последовательные пробелы и выбираем лучший
+        gap_segments = []
+        if gaps:
+            gap_start = gaps[0]
+            gap_end = gaps[0]
 
-        # Вычисляем смещение, необходимое для центрирования фигуры над пробелом
-        offset = gap_center - piece_center_x
-        desired_x = current_x + int(offset)
+            for i in range(1, len(gaps)):
+                if gaps[i] == gaps[i-1] + 1:
+                    gap_end = gaps[i]
+                else:
+                    gap_segments.append((gap_start, gap_end))
+                    gap_start = gaps[i]
+                    gap_end = gaps[i]
+            gap_segments.append((gap_start, gap_end))
+
+        if not gap_segments:
+            return piece.get_x()
+
+        # Выбираем пробел, который лучше всего подходит для фигуры
+        best_position = current_x
+        best_score = -1
+
+        for gap_start, gap_end in gap_segments:
+            gap_length = gap_end - gap_start + 1
+            gap_center = gap_start + gap_length / 2
+
+            # Оценка: предпочитаем пробелы, которые точно вмещают фигуру или немного больше
+            if gap_length >= piece_width:
+                # Пробел подходит по размеру
+                # Чем точнее, тем лучше
+                score = 100 - abs(gap_length - piece_width)
+                # Бонус за центрирование
+                position_x = gap_center - piece_center_x + current_x
+                if 0 <= position_x <= GRID_WIDTH - piece_width:
+                    score += 20
+                    if score > best_score:
+                        best_score = score
+                        best_position = int(position_x)
+            elif gap_length >= piece_width - 1:
+                # Почти подходит - можно попробовать
+                score = 50
+                position_x = gap_center - piece_center_x + current_x
+                if 0 <= position_x <= GRID_WIDTH - piece_width:
+                    if score > best_score:
+                        best_score = score
+                        best_position = int(position_x)
 
         # Ограничиваем границами поля
-        desired_x = max(0, min(GRID_WIDTH - 1, desired_x))
+        best_position = max(0, min(GRID_WIDTH - 1, best_position))
 
-        return desired_x
+        # Проверяем, что фигура не выходит за границы
+        test_piece_x = best_position
+        piece_x_positions_test = [test_piece_x + dx for dx, dy in shape]
+        if min(piece_x_positions_test) < 0:
+            best_position = -min(piece_x_positions_test)
+        if max(piece_x_positions_test) >= GRID_WIDTH:
+            best_position = GRID_WIDTH - 1 - \
+                max(piece_x_positions_test) + current_x
+
+        return max(0, min(GRID_WIDTH - 1, best_position))
 
     def analyze_grid_for_spawn(self):
         """Анализирует поле и возвращает подходящую позицию X и тип фигуры"""
@@ -234,6 +290,11 @@ class GameView(arcade.View):
         y = GRID_HEIGHT - 1
 
         self.current_piece = Tetromino(piece_type, color, x, y)
+
+        # Случайный поворот фигуры перед появлением (0, 90, 180 или 270 градусов)
+        rotations = random.randint(0, 3)
+        for _ in range(rotations):
+            self.current_piece.rotate()
 
     def is_cell_free(self, x, y, ignore_apple=None):
         """Проверяет, свободна ли клетка (не занята блоками, фигурой, змейкой)"""
@@ -577,22 +638,29 @@ class GameView(arcade.View):
             # Автоматическое позиционирование для заполнения рядов
             if self.current_piece:
                 best_row, max_filled = self.find_best_target_row()
-                # Если есть ряд, который заполнен хотя бы на 40%, пытаемся его заполнить
-                if best_row >= 0 and max_filled >= int(GRID_WIDTH * 0.4):
+                # Если есть ряд, который заполнен хотя бы на 30%, пытаемся его заполнить
+                if best_row >= 0 and max_filled >= int(GRID_WIDTH * 0.3):
                     # Находим лучшую позицию для фигуры
                     desired_x = self.find_best_position_for_piece(
                         self.current_piece, best_row)
                     current_x = self.current_piece.get_x()
 
-                    # Плавно сдвигаем фигуру к целевой позиции (постепенно, не резко)
+                    # Более агрессивное позиционирование - сдвигаем быстрее
                     if desired_x != current_x:
                         dx = 1 if desired_x > current_x else -1
-                        # Сдвигаем только если разница значительная или фигура еще высоко
                         piece_y = self.current_piece.get_y()
-                        if abs(desired_x - current_x) > 0 and piece_y > GRID_HEIGHT - 10:
+                        # Сдвигаем активнее, особенно когда фигура еще высоко
+                        if piece_y > GRID_HEIGHT - 12:
                             # Пытаемся сдвинуть, проверяя валидность
                             if self.is_valid_position(self.current_piece, dx, 0):
                                 self.current_piece.move(dx, 0)
+                            # Если разница большая, делаем дополнительный шаг
+                            elif abs(desired_x - current_x) > 2 and piece_y > GRID_HEIGHT - 15:
+                                # Пробуем сдвинуть на 2 шага, если возможно
+                                if self.is_valid_position(self.current_piece, dx * 2, 0):
+                                    self.current_piece.move(dx, 0)
+                                    if self.is_valid_position(self.current_piece, dx, 0):
+                                        self.current_piece.move(dx, 0)
 
             if not self.move_piece(0, -1):
                 # Если не можем двигаться вниз, фиксируем фигуру

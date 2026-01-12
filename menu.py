@@ -114,7 +114,7 @@ class MainMenuView(arcade.View):
         arcade.draw_text(
             "ТЕТРИС СО ЗМЕЙКОЙ",
             SCREEN_WIDTH // 2, SCREEN_HEIGHT - 150,
-            arcade.color.WHITE, 48,
+            arcade.color.WHITE, 36,
             anchor_x="center", anchor_y="center",
             bold=True
         )
