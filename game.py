@@ -3,13 +3,20 @@ import arcade
 import random
 import json
 import os
+import pymunk
+import copy
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
-    MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS
+    MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS,
+    PIECE_SPAWN_DELAY, PIECE_SPAWN_DELAY_CYCLES, COLUMN_CLEAR_THRESHOLD,
+    POINTS_PER_LINE
 )
 from snake import Snake
 from tetromino import Tetromino
 from apple import Apple
+from menu import load_settings
+from particles import ParticleSystem
+from block_sprite import BlockSprite
 
 HIGH_SCORE_FILE = "high_score.json"
 
@@ -52,6 +59,10 @@ class GameView(arcade.View):
         super().__init__()
         arcade.set_background_color((20, 25, 40))
 
+        # Загружаем настройки
+        settings = load_settings()
+        self.camera_follow_snake = settings.get('camera_follow_snake', False)
+
         # Настройки сложности
         self.difficulty = difficulty
         difficulty_config = DIFFICULTY_SETTINGS.get(
@@ -64,16 +75,21 @@ class GameView(arcade.View):
 
         self.current_piece = None
         self.fall_timer = 0.0
+        self.piece_spawn_delay_timer = 0.0
+        self.piece_spawn_delay_cycles = 0
+        self.piece_spawn_delay_applied = False  # Флаг, что задержка уже применена
         self.score = 0
+        self.max_score = 0  # Максимальный счёт за игру (для рекорда)
+        self.high_score = load_high_score()  # Загружаем текущий рекорд
 
-        # Инициализация змейки в случайной позиции
-        snake_x = random.randint(5, GRID_WIDTH - 5)
-        snake_y = random.randint(5, GRID_HEIGHT - 5)
+        # Инициализация змейки в безопасной позиции
+        snake_x, snake_y = self._find_safe_snake_spawn()
         self.snake = Snake(snake_x, snake_y)
         self.snake_timer = 0.0
 
-        # Яблоко
+        # Яблоко (теперь спрайт)
         self.apple = None
+        self.apple_sprite_list = arcade.SpriteList()
         self.spawn_apple()
 
         self.spawn_new_piece()
@@ -85,21 +101,334 @@ class GameView(arcade.View):
         self.pieces_count = 0
         self.base_fall_speed = self.fall_speed  # Сохраняем базовую скорость
 
+        # Система частиц
+        self.particle_system = ParticleSystem()
+
+        # Спрайты для блоков (для использования методов collide)
+        self.block_sprites = arcade.SpriteList()
+
+        # Физический движок (pymunk)
+        self.space = pymunk.Space()
+        self.space.gravity = (0, -981)  # Гравитация вниз
+
+        # Звуки
+        self.sound_eat_apple = None
+        self.sound_line_clear = None
+        self.sound_game_over = None
+        self.sound_background = None
+        self.background_music_player = None
+        self.load_sounds()
+
+        # Запускаем фоновую музыку
+        if self.sound_background:
+            self.background_music_player = self.sound_background.play(
+                volume=0.3, loop=True)
+
+        # Настройки камеры
+        # Увеличение при следовании за змейкой (меньше = больше область видимости)
+        self.camera_zoom = 1.2
+        # Инициализируем камеру начальной позицией змейки
+        snake_head = self.snake.get_head()
+        self.camera_x = MARGIN + snake_head[0] * CELL_SIZE + CELL_SIZE // 2
+        self.camera_y = MARGIN + snake_head[1] * CELL_SIZE + CELL_SIZE // 2
+        # Создаем камеру для игрового поля
+        self._camera = arcade.Camera2D()
+        # Создаем камеру по умолчанию для UI
+        self._ui_camera = arcade.Camera2D()
+
+        # Анимация для фигур
+        self.piece_animation_timer = 0.0
+
+    def load_sounds(self):
+        """Загружает звуки игры"""
+        try:
+            # Пытаемся загрузить звуки из встроенных ресурсов arcade
+            sound_paths = {
+                'eat_apple': [
+                    ":resources:sounds/coin1.wav",
+                    ":resources:sounds/coin2.wav",
+                    ":resources:sounds/coin3.wav",
+                    ":resources:sounds/coin4.wav",
+                    ":resources:sounds/coin5.wav",
+                ],
+                'line_clear': [
+                    ":resources:sounds/upgrade1.wav",
+                    ":resources:sounds/upgrade2.wav",
+                    ":resources:sounds/upgrade3.wav",
+                    ":resources:sounds/upgrade4.wav",
+                    ":resources:sounds/upgrade5.wav",
+                ],
+                'game_over': [
+                    ":resources:sounds/gameover1.wav",
+                    ":resources:sounds/gameover2.wav",
+                    ":resources:sounds/gameover3.wav",
+                    ":resources:sounds/gameover4.wav",
+                    ":resources:sounds/gameover5.wav",
+                ],
+                'background': [
+                    ":resources:music/funkyrobot.mp3",
+                    ":resources:music/1918.mp3",
+                ]
+            }
+
+            for sound_name, paths in sound_paths.items():
+                for path in paths:
+                    try:
+                        if sound_name == 'eat_apple':
+                            self.sound_eat_apple = arcade.load_sound(path)
+                        elif sound_name == 'line_clear':
+                            self.sound_line_clear = arcade.load_sound(path)
+                        elif sound_name == 'game_over':
+                            self.sound_game_over = arcade.load_sound(path)
+                        elif sound_name == 'background':
+                            self.sound_background = arcade.load_sound(path)
+                        break
+                    except:
+                        continue
+        except:
+            pass  # Если звуки не загрузились, продолжаем без них
+
+    def _find_safe_snake_spawn(self):
+        """Находит безопасную позицию для спавна змейки
+        Проверяет, что змейка не спавнится:
+        - слишком близко к стенам в направлении движения (вправо)
+        - под падающим блоком или перед ним
+        - в области с блоками на сетке
+        """
+        # Змейка изначально движется вправо (direction = 1)
+        # Минимальные отступы от стен для безопасности
+        min_distance_from_right = 6  # От правой стены (направление движения)
+        min_distance_from_left = 3   # От левой стены
+        min_distance_from_top = 4    # От верхней стены
+        min_distance_from_bottom = 3  # От нижней стены
+        
+        # Змейка имеет длину 3, поэтому нужно учесть это
+        snake_length = 3
+        
+        max_attempts = 500
+        for attempt in range(max_attempts):
+            # Генерируем случайную позицию с учетом минимальных отступов
+            snake_x = random.randint(
+                min_distance_from_left,
+                GRID_WIDTH - min_distance_from_right - snake_length
+            )
+            snake_y = random.randint(
+                min_distance_from_bottom,
+                GRID_HEIGHT - min_distance_from_top
+            )
+            
+            # Проверяем, что позиция безопасна
+            if self._is_safe_spawn_position(snake_x, snake_y):
+                return snake_x, snake_y
+        
+        # Если не нашли безопасную позицию после всех попыток,
+        # возвращаем позицию по умолчанию (центр поля с отступами)
+        default_x = max(min_distance_from_left, 
+                       min(GRID_WIDTH - min_distance_from_right - snake_length,
+                           GRID_WIDTH // 2 - snake_length // 2))
+        default_y = max(min_distance_from_bottom,
+                       min(GRID_HEIGHT - min_distance_from_top,
+                           GRID_HEIGHT // 2))
+        return default_x, default_y
+
+    def _is_safe_spawn_position(self, snake_x, snake_y):
+        """Проверяет, является ли позиция безопасной для спавна змейки"""
+        # Змейка имеет длину 3 и движется вправо
+        # Тело змейки: [(x, y), (x-1, y), (x-2, y)]
+        snake_body = [(snake_x, snake_y), (snake_x - 1, snake_y), (snake_x - 2, snake_y)]
+        
+        # Проверяем каждую часть тела змейки
+        for x, y in snake_body:
+            # Проверяем границы
+            if x < 0 or x >= GRID_WIDTH or y < 0 or y >= GRID_HEIGHT:
+                return False
+            
+            # Проверяем, что нет блоков на сетке
+            if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
+                if self.grid[y][x] is not None:
+                    return False
+        
+        # Проверяем, что в направлении движения (вправо) есть достаточно места
+        # Проверяем следующие 5 клеток вправо от головы
+        safe_distance_ahead = 5
+        for i in range(1, safe_distance_ahead + 1):
+            check_x = snake_x + i
+            check_y = snake_y
+            
+            # Если вышли за границы - это плохо (слишком близко к стене)
+            if check_x >= GRID_WIDTH:
+                return False
+            
+            # Проверяем, что впереди нет блоков
+            if 0 <= check_y < GRID_HEIGHT and 0 <= check_x < GRID_WIDTH:
+                if self.grid[check_y][check_x] is not None:
+                    return False
+        
+        # Проверяем, что нет падающей фигуры в опасной близости
+        # (хотя при инициализации current_piece еще None, но на всякий случай)
+        if self.current_piece:
+            piece_positions = self.current_piece.get_positions()
+            # Проверяем, не пересекается ли змейка с падающей фигурой
+            for snake_x_pos, snake_y_pos in snake_body:
+                if (snake_x_pos, snake_y_pos) in piece_positions:
+                    return False
+            
+            # Проверяем, не находится ли падающая фигура прямо над змейкой
+            # или в опасной близости впереди
+            piece_min_y = min(py for px, py in piece_positions)
+            piece_max_x = max(px for px, py in piece_positions)
+            piece_min_x = min(px for px, py in piece_positions)
+            
+            # Если фигура находится над змейкой (по Y) и может упасть на нее
+            if piece_min_y > snake_y:
+                # Проверяем, не находится ли фигура в опасной близости по X
+                if not (piece_max_x < snake_x - 2 or piece_min_x > snake_x + safe_distance_ahead):
+                    return False
+        
+        # Проверяем, что есть место для маневра вверх и вниз
+        # (чтобы игрок мог повернуть, если нужно)
+        if snake_y + 2 >= GRID_HEIGHT or snake_y - 2 < 0:
+            return False
+        
+        # Проверяем, что сверху и снизу нет блоков в опасной близости
+        for offset_y in [-2, -1, 1, 2]:
+            check_y = snake_y + offset_y
+            if 0 <= check_y < GRID_HEIGHT:
+                # Проверяем позиции тела змейки по X
+                for offset_x in [0, -1, -2]:
+                    check_x = snake_x + offset_x
+                    if 0 <= check_x < GRID_WIDTH:
+                        if self.grid[check_y][check_x] is not None:
+                            # Блок слишком близко - небезопасно
+                            return False
+        
+        return True
+
+    def _is_piece_safe_from_snake(self, piece):
+        """Проверяет, не находится ли фигура в опасной позиции относительно змейки
+        Фигура считается опасной, если она:
+        - находится прямо над змейкой или в опасной близости
+        - может упасть на змейку слишком быстро
+        """
+        if not hasattr(self, 'snake') or not self.snake:
+            return True  # Если змейки еще нет, позиция безопасна
+        
+        piece_positions = piece.get_positions()
+        snake_body = self.snake.get_body()
+        snake_head = self.snake.get_head()
+        snake_x, snake_y = snake_head
+        
+        # Находим границы фигуры
+        piece_min_x = min(px for px, py in piece_positions)
+        piece_max_x = max(px for px, py in piece_positions)
+        piece_min_y = min(py for px, py in piece_positions)
+        piece_max_y = max(py for px, py in piece_positions)
+        
+        # Находим границы змейки
+        snake_min_x = min(sx for sx, sy in snake_body)
+        snake_max_x = max(sx for sx, sy in snake_body)
+        snake_min_y = min(sy for sx, sy in snake_body)
+        snake_max_y = max(sy for sx, sy in snake_body)
+        
+        # Проверяем, не находится ли фигура прямо над змейкой
+        # (по X координате пересекается с змейкой)
+        x_overlap = not (piece_max_x < snake_min_x - 1 or piece_min_x > snake_max_x + 1)
+        
+        if x_overlap:
+            # Если есть пересечение по X, проверяем расстояние по Y
+            # Фигура находится вверху (y = GRID_HEIGHT - 1), змейка ниже
+            # Вычисляем минимальное расстояние по Y между фигурой и змейкой
+            # (фигура выше змейки, поэтому piece_min_y > snake_max_y)
+            vertical_distance = piece_min_y - snake_max_y
+            
+            # Если расстояние слишком маленькое (меньше 8 клеток), это опасно
+            # Игрок должен иметь время среагировать
+            if vertical_distance < 8:
+                return False
+        
+        # Проверяем, не находится ли фигура в опасной близости впереди змейки
+        # (змейка движется вправо, поэтому проверяем справа от змейки)
+        # Если фигура находится справа от змейки и может упасть на ее путь
+        if piece_min_x >= snake_max_x:
+            # Фигура справа от змейки
+            horizontal_distance = piece_min_x - snake_max_x
+            # Если фигура слишком близко (меньше 3 клеток) и может упасть на путь змейки
+            if horizontal_distance < 3 and x_overlap:
+                return False
+        
+        # Проверяем, не находится ли фигура слишком близко по диагонали
+        # (может упасть на змейку при движении)
+        if x_overlap:
+            # Если фигура находится в опасной зоне (может упасть на змейку быстро)
+            # Проверяем, что есть достаточно времени для реакции
+            min_safe_distance = 6  # Минимальное безопасное расстояние
+            if vertical_distance < min_safe_distance:
+                return False
+        
+        return True
+
     def find_best_target_row(self):
-        """Находит лучший ряд для заполнения (самый заполненный, но не полностью)"""
+        """Находит лучший ряд для заполнения (приоритет рядам, близким к завершению)"""
         best_row = -1
+        best_score = -1
         max_filled = 0
 
         # Анализируем нижние 15 рядов (игровую зону)
         for y in range(max(0, GRID_HEIGHT - 15), GRID_HEIGHT):
             filled_count = sum(1 for x in range(GRID_WIDTH)
                                if self.grid[y][x] is not None)
-            # Ищем ряд с максимальным заполнением, но не полностью заполненный
-            if filled_count > max_filled and filled_count < GRID_WIDTH:
-                max_filled = filled_count
-                best_row = y
 
-        return best_row, max_filled
+            # Пропускаем полностью заполненные ряды
+            if filled_count >= GRID_WIDTH:
+                continue
+
+            # Вычисляем "ценность" ряда: чем больше заполнен и чем ниже, тем лучше
+            fill_ratio = filled_count / GRID_WIDTH
+            height_bonus = (GRID_HEIGHT - y) / \
+                GRID_HEIGHT  # Нижние ряды важнее
+
+            # Улучшенная оценка: приоритет рядам с заполнением 30-95%
+            if fill_ratio >= 0.3:
+                score = fill_ratio * 120 + height_bonus * 30
+                # Большой бонус за ряды, близкие к завершению
+                if fill_ratio >= 0.9:
+                    score += 50  # Почти готовый ряд - максимальный приоритет
+                elif fill_ratio >= 0.8:
+                    score += 40
+                elif fill_ratio >= 0.7:
+                    score += 30
+                elif fill_ratio >= 0.6:
+                    score += 20
+                elif fill_ratio >= 0.5:
+                    score += 15
+
+                # Дополнительный бонус за последовательные заполненные клетки
+                consecutive_bonus = 0
+                max_consecutive = 0
+                current_consecutive = 0
+                for x in range(GRID_WIDTH):
+                    if self.grid[y][x] is not None:
+                        current_consecutive += 1
+                        max_consecutive = max(
+                            max_consecutive, current_consecutive)
+                    else:
+                        current_consecutive = 0
+                consecutive_bonus = max_consecutive * 2
+                score += consecutive_bonus
+
+                if score > best_score:
+                    best_score = score
+                    best_row = y
+                    max_filled = filled_count
+            elif filled_count > 0:
+                # Для рядов с меньшим заполнением используем меньший приоритет
+                score = fill_ratio * 40 + height_bonus * 15
+                if score > best_score and best_row == -1:
+                    best_score = score
+                    best_row = y
+                    max_filled = filled_count
+
+        return best_row, max_filled if best_row >= 0 else 0
 
     def find_best_position_for_piece(self, piece, target_row):
         """Находит лучшую позицию X для фигуры, чтобы заполнить пробелы в целевом ряду"""
@@ -115,45 +444,77 @@ class GameView(arcade.View):
         if not gaps:
             return piece.get_x()
 
-        # Находим самый большой последовательный пробел
-        gap_start = gaps[0]
-        gap_end = gaps[0]
-        best_gap_start = gaps[0]
-        best_gap_length = 1
-
-        for i in range(1, len(gaps)):
-            if gaps[i] == gaps[i-1] + 1:
-                gap_end = gaps[i]
-            else:
-                if gap_end - gap_start + 1 > best_gap_length:
-                    best_gap_length = gap_end - gap_start + 1
-                    best_gap_start = gap_start
-                gap_start = gaps[i]
-                gap_end = gaps[i]
-
-        if gap_end - gap_start + 1 > best_gap_length:
-            best_gap_length = gap_end - gap_start + 1
-            best_gap_start = gap_start
-
-        # Вычисляем реальные X координаты фигуры
+        # Анализируем форму фигуры
         shape = piece.get_shape()
         current_x = piece.get_x()
+
+        # Находим ширину фигуры по X
         piece_x_positions = [current_x + dx for dx, dy in shape]
         min_piece_x = min(piece_x_positions)
         max_piece_x = max(piece_x_positions)
+        piece_width = max_piece_x - min_piece_x + 1
         piece_center_x = (min_piece_x + max_piece_x) / 2
 
-        # Центр пробела
-        gap_center = best_gap_start + best_gap_length / 2
+        # Находим все последовательные пробелы и выбираем лучший
+        gap_segments = []
+        if gaps:
+            gap_start = gaps[0]
+            gap_end = gaps[0]
 
-        # Вычисляем смещение, необходимое для центрирования фигуры над пробелом
-        offset = gap_center - piece_center_x
-        desired_x = current_x + int(offset)
+            for i in range(1, len(gaps)):
+                if gaps[i] == gaps[i-1] + 1:
+                    gap_end = gaps[i]
+                else:
+                    gap_segments.append((gap_start, gap_end))
+                    gap_start = gaps[i]
+                    gap_end = gaps[i]
+            gap_segments.append((gap_start, gap_end))
+
+        if not gap_segments:
+            return piece.get_x()
+
+        # Выбираем пробел, который лучше всего подходит для фигуры
+        best_position = current_x
+        best_score = -1
+
+        for gap_start, gap_end in gap_segments:
+            gap_length = gap_end - gap_start + 1
+            gap_center = gap_start + gap_length / 2
+
+            # Оценка: предпочитаем пробелы, которые точно вмещают фигуру или немного больше
+            if gap_length >= piece_width:
+                # Пробел подходит по размеру
+                # Чем точнее, тем лучше
+                score = 100 - abs(gap_length - piece_width)
+                # Бонус за центрирование
+                position_x = gap_center - piece_center_x + current_x
+                if 0 <= position_x <= GRID_WIDTH - piece_width:
+                    score += 20
+                    if score > best_score:
+                        best_score = score
+                        best_position = int(position_x)
+            elif gap_length >= piece_width - 1:
+                # Почти подходит - можно попробовать
+                score = 50
+                position_x = gap_center - piece_center_x + current_x
+                if 0 <= position_x <= GRID_WIDTH - piece_width:
+                    if score > best_score:
+                        best_score = score
+                        best_position = int(position_x)
 
         # Ограничиваем границами поля
-        desired_x = max(0, min(GRID_WIDTH - 1, desired_x))
+        best_position = max(0, min(GRID_WIDTH - 1, best_position))
 
-        return desired_x
+        # Проверяем, что фигура не выходит за границы
+        test_piece_x = best_position
+        piece_x_positions_test = [test_piece_x + dx for dx, dy in shape]
+        if min(piece_x_positions_test) < 0:
+            best_position = -min(piece_x_positions_test)
+        if max(piece_x_positions_test) >= GRID_WIDTH:
+            best_position = GRID_WIDTH - 1 - \
+                max(piece_x_positions_test) + current_x
+
+        return max(0, min(GRID_WIDTH - 1, best_position))
 
     def analyze_grid_for_spawn(self):
         """Анализирует поле и возвращает подходящую позицию X и тип фигуры"""
@@ -235,8 +596,44 @@ class GameView(arcade.View):
 
         self.current_piece = Tetromino(piece_type, color, x, y)
 
-    def is_cell_free(self, x, y, ignore_apple=None):
-        """Проверяет, свободна ли клетка (не занята блоками, фигурой, змейкой)"""
+        # Случайный поворот фигуры перед появлением (0, 90, 180 или 270 градусов)
+        rotations = random.randint(0, 3)
+        for _ in range(rotations):
+            self.current_piece.rotate()
+
+        # Проверяем, не находится ли фигура в опасной позиции относительно змейки
+        # Если да, пытаемся найти безопасную позицию
+        if not self._is_piece_safe_from_snake(self.current_piece):
+            # Пытаемся найти безопасную позицию
+            safe_found = False
+            for attempt in range(50):  # Максимум 50 попыток
+                # Пробуем разные X позиции
+                test_x = random.randint(2, GRID_WIDTH - 3)
+                self.current_piece.x = test_x
+                self.current_piece.y = GRID_HEIGHT - 1
+                
+                # Пробуем разные повороты
+                test_rotations = random.randint(0, 3)
+                # Сбрасываем поворот
+                self.current_piece.shape = copy.deepcopy(TETROMINOES[piece_type])
+                for _ in range(test_rotations):
+                    self.current_piece.rotate()
+                
+                if self._is_piece_safe_from_snake(self.current_piece):
+                    safe_found = True
+                    break
+            
+            # Если не нашли безопасную позицию, оставляем как есть
+            # (лучше чем ничего, и задержка спавна даст время игроку)
+
+        # Сбрасываем таймер задержки после появления
+        self.piece_spawn_delay_timer = 0.0
+        self.piece_spawn_delay_cycles = 0
+        self.piece_spawn_delay_applied = False  # Сбрасываем флаг задержки
+
+    def is_cell_free(self, x, y, ignore_apple=None, ignore_snake=False):
+        """Проверяет, свободна ли клетка (не занята блоками, фигурой, змейкой)
+        ignore_snake: если True, не учитывает змейку как препятствие"""
         # Проверяем границы
         if x < 0 or x >= GRID_WIDTH or y < 0 or y >= GRID_HEIGHT:
             return False
@@ -254,93 +651,131 @@ class GameView(arcade.View):
         # Проверяем змейку (игнорируем яблоко, если указано)
         if ignore_apple and (x, y) == ignore_apple:
             return True
-        if self.snake.check_collision_with_position(x, y):
+        if not ignore_snake and self.snake.check_collision_with_position(x, y):
             return False
 
         return True
 
     def is_apple_accessible(self, apple_x, apple_y):
-        """Проверяет доступность яблока для змейки с помощью BFS"""
-        # Если яблоко внизу (y < 5), проверяем доступность более тщательно
-        if apple_y >= 5:
-            # Для яблок выше проверяем только базовую доступность
-            return True
-
-        # Используем BFS для поиска пути от головы змейки до яблока
+        """Проверяет доступность яблока для змейки:
+        1. Находит кратчайший путь от змейки до яблока (не учитывая змейку как препятствие)
+        2. Если путь найден, занимает пространство размером змейки от яблока
+        3. Проверяет путь от яблока до центра/пустого места для возврата"""
         snake_head = self.snake.get_head()
-        start = snake_head
-
-        # Проверяем, можем ли добраться до яблока
-        queue = [start]
-        visited = {start}
+        snake_length = len(self.snake.get_body())
         # Вверх, вправо, вниз, влево
         directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
 
-        found_apple = False
+        # Шаг 1: Находим кратчайший путь от змейки до яблока
+        # НЕ учитываем змейку как препятствие (только блоки тетриса)
+        start = snake_head
+        queue = [(start, [start])]  # (позиция, путь)
+        visited = {start}
+        path_to_apple = None
+
         while queue:
-            current = queue.pop(0)
+            current, path = queue.pop(0)
 
             if current == (apple_x, apple_y):
-                found_apple = True
+                path_to_apple = path
                 break
 
             for dx, dy in directions:
                 nx, ny = current[0] + dx, current[1] + dy
                 neighbor = (nx, ny)
 
-                # Проверяем, свободна ли клетка (игнорируем яблоко)
-                if not self.is_cell_free(nx, ny, ignore_apple=(apple_x, apple_y)):
+                # Проверяем границы
+                if nx < 0 or nx >= GRID_WIDTH or ny < 0 or ny >= GRID_HEIGHT:
+                    continue
+
+                # Проверяем, свободна ли клетка (игнорируем яблоко и змейку)
+                if not self.is_cell_free(nx, ny, ignore_apple=(apple_x, apple_y), ignore_snake=True):
                     continue
 
                 if neighbor not in visited:
                     visited.add(neighbor)
-                    queue.append(neighbor)
+                    new_path = path + [neighbor]
+                    queue.append((neighbor, new_path))
 
-        if not found_apple:
+        if not path_to_apple:
             return False  # Не можем добраться до яблока
 
-        # Теперь проверяем, можем ли выбраться от яблока
-        # Используем BFS от яблока, чтобы найти путь к свободному пространству
-        # Считаем, что яблоко доступно, если есть хотя бы 2 свободных соседних клетки
-        free_neighbors = 0
-        for dx, dy in directions:
-            nx, ny = apple_x + dx, apple_y + dy
-            if self.is_cell_free(nx, ny, ignore_apple=(apple_x, apple_y)):
-                free_neighbors += 1
+        # Шаг 2: Занимаем пространство размером змейки от яблока
+        # Берем последние snake_length клеток пути от яблока
+        occupied_cells = set()
+        if len(path_to_apple) >= snake_length:
+            # Берем последние snake_length клеток пути (включая яблоко)
+            for i in range(len(path_to_apple) - snake_length, len(path_to_apple)):
+                occupied_cells.add(path_to_apple[i])
+        else:
+            # Если путь короче длины змейки, занимаем весь путь
+            occupied_cells = set(path_to_apple)
 
-        # Если к яблоко ведет только 1 клетка или меньше, оно недоступно
-        # (змейка не сможет выбраться после того, как съест яблоко)
-        if free_neighbors < 2:
-            return False
+        # Шаг 3: Проверяем путь от яблока до центра/пустого места
+        # Ищем центр поля или ближайшее пустое место
+        center_x = GRID_WIDTH // 2
+        center_y = GRID_HEIGHT // 2
 
-        # Дополнительная проверка: можем ли выбраться от яблока (BFS от яблока)
-        # Проверяем, что от яблока можно добраться до области выше (y >= 3)
-        escape_queue = [(apple_x, apple_y)]
-        escape_visited = {(apple_x, apple_y)}
-        can_escape = False
+        # Ищем ближайшее пустое место к центру
+        target_positions = []
+        for y in range(max(0, center_y - 5), min(GRID_HEIGHT, center_y + 6)):
+            for x in range(max(0, center_x - 5), min(GRID_WIDTH, center_x + 6)):
+                if self.is_cell_free(x, y, ignore_apple=(apple_x, apple_y), ignore_snake=True):
+                    target_positions.append((x, y))
 
-        while escape_queue:
-            current = escape_queue.pop(0)
-            cx, cy = current
+        # Если не нашли пустых мест около центра, ищем любое пустое место выше
+        if not target_positions:
+            for y in range(GRID_HEIGHT // 2, GRID_HEIGHT):
+                for x in range(GRID_WIDTH):
+                    if self.is_cell_free(x, y, ignore_apple=(apple_x, apple_y), ignore_snake=True):
+                        target_positions.append((x, y))
+                        if len(target_positions) >= 5:
+                            break
+                if len(target_positions) >= 5:
+                    break
 
-            # Если достигли области выше, можем выбраться
-            if cy >= 3:
-                can_escape = True
+        if not target_positions:
+            return False  # Нет пустых мест для возврата
+
+        # Проверяем путь от яблока до любого из целевых мест
+        # При этом учитываем занятые клетки (пространство змейки)
+        escape_found = False
+        # Проверяем первые 3 целевых места
+        for target_x, target_y in target_positions[:3]:
+            escape_queue = [(apple_x, apple_y)]
+            escape_visited = {(apple_x, apple_y)}
+
+            while escape_queue:
+                current = escape_queue.pop(0)
+                cx, cy = current
+
+                if current == (target_x, target_y):
+                    escape_found = True
+                    break
+
+                for dx, dy in directions:
+                    nx, ny = cx + dx, cy + dy
+                    neighbor = (nx, ny)
+
+                    # Проверяем границы
+                    if nx < 0 or nx >= GRID_WIDTH or ny < 0 or ny >= GRID_HEIGHT:
+                        continue
+
+                    # Проверяем, свободна ли клетка (игнорируем яблоко, змейку, но учитываем занятые клетки)
+                    if neighbor in occupied_cells:
+                        continue  # Клетка занята пространством змейки
+
+                    if not self.is_cell_free(nx, ny, ignore_apple=(apple_x, apple_y), ignore_snake=True):
+                        continue
+
+                    if neighbor not in escape_visited:
+                        escape_visited.add(neighbor)
+                        escape_queue.append(neighbor)
+
+            if escape_found:
                 break
 
-            for dx, dy in directions:
-                nx, ny = cx + dx, cy + dy
-                neighbor = (nx, ny)
-
-                # Проверяем, свободна ли клетка
-                if not self.is_cell_free(nx, ny, ignore_apple=(apple_x, apple_y)):
-                    continue
-
-                if neighbor not in escape_visited:
-                    escape_visited.add(neighbor)
-                    escape_queue.append(neighbor)
-
-        return can_escape
+        return escape_found
 
     def spawn_apple(self):
         """Создает яблоко в случайной позиции (не на змейке, не на блоках, не на падающей фигуре, не в верхних 4 линиях, не под падающей фигурой)"""
@@ -374,19 +809,23 @@ class GameView(arcade.View):
                 if is_under_piece:
                     continue
 
-            # Нашли свободное место
+            # Нашли свободное место - создаем спрайт яблока
             self.apple = Apple(apple_x, apple_y)
+            self.apple_sprite_list.clear()
+            self.apple_sprite_list.append(self.apple)
 
             # Проверяем доступность яблока (особенно если оно внизу)
             if not self.is_apple_accessible(apple_x, apple_y):
                 # Яблоко недоступно - уничтожаем без снятия очков и создаем новое
                 self.apple = None
+                self.apple_sprite_list.clear()
                 continue
 
             return
 
         # Если не нашли место (очень маловероятно), ставим None
         self.apple = None
+        self.apple_sprite_list.clear()
 
     def is_valid_position(self, piece, x_offset=0, y_offset=0):
         """Проверяет, может ли фигура находиться в указанной позиции"""
@@ -404,7 +843,7 @@ class GameView(arcade.View):
 
     def lock_piece(self):
         """Фиксирует текущую фигуру на поле"""
-        # Проверяем, не раздавили ли яблоко падающей фигурой
+        # Проверяем, не раздавили ли яблоко падающей фигурой (используя collide)
         if self.apple:
             apple_pos = self.apple.get_position()
             piece_positions = self.current_piece.get_positions()
@@ -413,18 +852,37 @@ class GameView(arcade.View):
                 # Отнимаем 50 очков (не меньше 0)
                 apple_x, apple_y = apple_pos
                 self.score = max(0, self.score - 50)
+                self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                 self.add_score_message(-50, apple_x, apple_y)
+                # Частицы при раздавливании яблока
+                pixel_x = MARGIN + apple_x * CELL_SIZE + CELL_SIZE // 2
+                pixel_y = MARGIN + apple_y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_explosion(
+                    pixel_x, pixel_y, (255, 0, 0), count=15)
                 self.apple = None
+                self.apple_sprite_list.clear()
                 self.spawn_apple()
 
+        # Создаем спрайты для блоков и добавляем в список для collide
         for dx, dy in self.current_piece.get_shape():
             x = self.current_piece.get_x() + dx
             y = self.current_piece.get_y() + dy
 
             if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
                 self.grid[y][x] = self.current_piece.get_color()
+                # Создаем спрайт блока
+                block_sprite = BlockSprite(
+                    x, y, self.current_piece.get_color())
+                self.block_sprites.append(block_sprite)
+                # Анимация появления
+                pixel_x = MARGIN + x * CELL_SIZE + CELL_SIZE // 2
+                pixel_y = MARGIN + y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_explosion(
+                    pixel_x, pixel_y, self.current_piece.get_color(), count=5)
 
         self.clear_lines()
+        self.clear_columns()
 
         # Увеличиваем счетчик фигур и постепенно ускоряем падение
         self.pieces_count += 1
@@ -443,9 +901,30 @@ class GameView(arcade.View):
         """Удаляет заполненные линии"""
         lines_cleared = 0
         y = GRID_HEIGHT - 1
+        cleared_rows = []
 
         while y >= 0:
             if all(self.grid[y][x] is not None for x in range(GRID_WIDTH)):
+                # Собираем цвет для частиц
+                line_color = self.grid[y][0] if self.grid[y][0] else (
+                    255, 255, 255)
+                cleared_rows.append((y, line_color))
+
+                # Удаляем спрайты блоков этой линии
+                sprites_to_remove = []
+                for sprite in self.block_sprites:
+                    if sprite.grid_y == y:
+                        # Частицы при удалении блока
+                        pixel_x = sprite.center_x
+                        pixel_y = sprite.center_y
+                        self.particle_system.add_line_clear_particles(
+                            pixel_x, pixel_y, line_color, count=3
+                        )
+                        sprites_to_remove.append(sprite)
+
+                for sprite in sprites_to_remove:
+                    self.block_sprites.remove(sprite)
+
                 del self.grid[y]
                 self.grid.append([None for _ in range(GRID_WIDTH)])
                 lines_cleared += 1
@@ -454,9 +933,108 @@ class GameView(arcade.View):
 
         # Начисляем очки за очищенные линии
         if lines_cleared > 0:
-            score_gain = lines_cleared * 100
+            score_gain = lines_cleared * POINTS_PER_LINE
             self.score = max(0, self.score + score_gain)
+            self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+            self.check_and_update_high_score()  # Проверяем и обновляем рекорд
             self.add_score_message(score_gain)
+
+            # Звук очистки линии
+            if self.sound_line_clear:
+                arcade.play_sound(self.sound_line_clear, volume=0.5)
+
+            # Частицы для каждой очищенной линии
+            for row_y, color in cleared_rows:
+                center_x = SCREEN_WIDTH // 2
+                center_y = MARGIN + row_y * CELL_SIZE + CELL_SIZE // 2
+                self.particle_system.add_line_clear_particles(
+                    center_x, center_y, color, count=20)
+
+            # Обновляем позиции спрайтов после удаления линий
+            for sprite in self.block_sprites:
+                sprite.center_y = MARGIN + sprite.grid_y * CELL_SIZE + CELL_SIZE // 2
+
+    def clear_columns(self):
+        """Удаляет заполненные столбцы (если в столбце COLUMN_CLEAR_THRESHOLD или больше блоков подряд снизу)"""
+        columns_cleared = 0
+        cleared_columns = []
+
+        # Проверяем каждый столбец
+        for x in range(GRID_WIDTH):
+            # Считаем количество блоков подряд снизу вверх
+            blocks_count = 0
+            for y in range(GRID_HEIGHT):
+                if self.grid[y][x] is not None:
+                    blocks_count += 1
+                else:
+                    # Если встретили пустую клетку, прерываем подсчёт
+                    break
+
+            # Если в столбце COLUMN_CLEAR_THRESHOLD или больше блоков подряд снизу
+            if blocks_count >= COLUMN_CLEAR_THRESHOLD:
+                cleared_columns.append(x)
+                columns_cleared += 1
+
+                # Собираем цвет для частиц (берём цвет первого блока снизу)
+                column_color = self.grid[0][x] if self.grid[0][x] else (255, 255, 255)
+
+                # Удаляем спрайты блоков, которые находятся в удаляемых позициях (первые blocks_count снизу)
+                sprites_to_remove = []
+                for sprite in self.block_sprites:
+                    if sprite.grid_x == x and sprite.grid_y < blocks_count:
+                        # Частицы при удалении блока
+                        pixel_x = sprite.center_x
+                        pixel_y = sprite.center_y
+                        self.particle_system.add_line_clear_particles(
+                            pixel_x, pixel_y, column_color, count=3
+                        )
+                        sprites_to_remove.append(sprite)
+
+                for sprite in sprites_to_remove:
+                    self.block_sprites.remove(sprite)
+
+                # Удаляем блоки из столбца (снизу вверх, blocks_count штук)
+                for y in range(blocks_count):
+                    if y < GRID_HEIGHT:
+                        self.grid[y][x] = None
+
+                # Сдвигаем все блоки выше удалённых вниз
+                # Создаём временный список для столбца
+                column_blocks = []
+                for y in range(blocks_count, GRID_HEIGHT):
+                    column_blocks.append(self.grid[y][x])
+                    self.grid[y][x] = None
+
+                # Вставляем блоки обратно, начиная снизу
+                for i, block in enumerate(column_blocks):
+                    if block is not None:
+                        self.grid[i][x] = block
+
+                # Обновляем позиции спрайтов в этом столбце (только тех, что выше удалённых)
+                for sprite in self.block_sprites:
+                    if sprite.grid_x == x and sprite.grid_y >= blocks_count:
+                        sprite.grid_y = sprite.grid_y - blocks_count
+                        sprite.center_y = MARGIN + sprite.grid_y * CELL_SIZE + CELL_SIZE // 2
+
+        # Начисляем очки за очищенные столбцы
+        if columns_cleared > 0:
+            score_gain = columns_cleared * 150  # Больше очков за столбцы, чем за линии
+            self.score = max(0, self.score + score_gain)
+            self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+            self.check_and_update_high_score()  # Проверяем и обновляем рекорд
+            self.add_score_message(score_gain)
+
+            # Звук очистки столбца
+            if self.sound_line_clear:
+                arcade.play_sound(self.sound_line_clear, volume=0.5)
+
+            # Частицы для каждого очищенного столбца
+            for col_x in cleared_columns:
+                center_x = MARGIN + col_x * CELL_SIZE + CELL_SIZE // 2
+                center_y = MARGIN + (COLUMN_CLEAR_THRESHOLD // 2) * CELL_SIZE + CELL_SIZE // 2
+                column_color = (255, 200, 0)  # Золотистый цвет для столбцов
+                self.particle_system.add_line_clear_particles(
+                    center_x, center_y, column_color, count=30)
 
     def move_piece(self, dx, dy):
         """Перемещает фигуру"""
@@ -471,6 +1049,8 @@ class GameView(arcade.View):
                     # Яблоко раздавлено
                     apple_x, apple_y = apple_pos
                     self.score = max(0, self.score - 50)
+                    self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                    self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                     self.add_score_message(-50, apple_x, apple_y)
                     self.apple = None
                     self.spawn_apple()
@@ -479,7 +1059,7 @@ class GameView(arcade.View):
         return False
 
     def check_snake_collision(self):
-        """Проверяет столкновение змейки со стеной, фигурами или с собой (проверяет все части змейки)"""
+        """Проверяет столкновение змейки со стеной, фигурами или с собой (использует методы collide)"""
         snake_body = self.snake.get_body()
 
         # Проверка столкновения головы с телом (столкновение с собой)
@@ -493,10 +1073,21 @@ class GameView(arcade.View):
             if snake_x < 0 or snake_x >= GRID_WIDTH or snake_y < 0 or snake_y >= GRID_HEIGHT:
                 return True
 
-            # Проверка столкновения с зафиксированными блоками
+            # Проверка столкновения с зафиксированными блоками (используя collide)
             if 0 <= snake_y < GRID_HEIGHT and 0 <= snake_x < GRID_WIDTH:
                 if self.grid[snake_y][snake_x] is not None:
-                    return True
+                    # Создаем временный спрайт для проверки столкновения
+                    temp_sprite = arcade.Sprite()
+                    temp_sprite.center_x = MARGIN + snake_x * CELL_SIZE + CELL_SIZE // 2
+                    temp_sprite.center_y = MARGIN + snake_y * CELL_SIZE + CELL_SIZE // 2
+                    temp_sprite.width = CELL_SIZE
+                    temp_sprite.height = CELL_SIZE
+
+                    # Проверяем столкновение со спрайтами блоков
+                    hit_list = arcade.check_for_collision_with_list(
+                        temp_sprite, self.block_sprites)
+                    if hit_list:
+                        return True
 
         # Проверка столкновения с падающей фигурой (отдельно для головы и тела)
         if self.current_piece:
@@ -517,14 +1108,27 @@ class GameView(arcade.View):
                         if len(self.snake.body) < 3:
                             # Игра заканчивается - змейка слишком короткая
                             return True
-                        # Снимаем по 50 очков за каждый отрубленный кусок
-                        score_loss = removed_count * 50
+                        # Снимаем по 25 очков за каждый отрубленный кусок
+                        score_loss = removed_count * 25
                         self.score = max(0, self.score - score_loss)
+                        self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                        self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                         # Показываем изменение очков
                         self.add_score_message(-score_loss, snake_x, snake_y)
+                        # Частицы при обрезании
+                        pixel_x = MARGIN + snake_x * CELL_SIZE + CELL_SIZE // 2
+                        pixel_y = MARGIN + snake_y * CELL_SIZE + CELL_SIZE // 2
+                        self.particle_system.add_explosion(
+                            pixel_x, pixel_y, (255, 100, 0), count=10)
                     break  # Обрабатываем только первое касание
 
         return False
+
+    def check_and_update_high_score(self):
+        """Проверяет и обновляет рекорд, если текущий максимальный счёт больше"""
+        if self.max_score > self.high_score:
+            self.high_score = self.max_score
+            save_high_score(self.high_score)
 
     def add_score_message(self, score_change, x=None, y=None):
         """Добавляет сообщение об изменении очков (всегда показываем сверху по центру)"""
@@ -551,10 +1155,19 @@ class GameView(arcade.View):
 
     def game_over(self):
         """Завершает игру и показывает экран проигрыша"""
-        # Обновляем рекорд, если текущий счёт больше
-        high_score = load_high_score()
-        if self.score > high_score:
-            save_high_score(self.score)
+        # Останавливаем фоновую музыку
+        if self.background_music_player:
+            arcade.stop_sound(self.background_music_player)
+
+        # Звук окончания игры
+        if self.sound_game_over:
+            arcade.play_sound(self.sound_game_over, volume=0.8)
+
+        # Обновляем рекорд, если максимальный счёт за игру больше
+        # (используем max_score, а не финальный score)
+        if self.max_score > self.high_score:
+            self.high_score = self.max_score
+            save_high_score(self.high_score)
 
         from menu import GameOverView
         game_over_view = GameOverView(self.score)
@@ -562,6 +1175,38 @@ class GameView(arcade.View):
 
     def on_update(self, delta_time):
         """Обновление игры"""
+        # Обновление физического движка
+        self.space.step(delta_time)
+
+        # Обновление анимаций
+        self.piece_animation_timer += delta_time
+
+        # Обновление анимации яблока
+        if self.apple:
+            self.apple.update_animation(delta_time)
+
+        # Обновление анимаций спрайтов блоков
+        for sprite in self.block_sprites:
+            if hasattr(sprite, 'update_animation'):
+                sprite.update_animation(delta_time)
+
+        # Обновление системы частиц
+        self.particle_system.update(delta_time)
+
+        # Обновление камеры (следует за змейкой)
+        if self.camera_follow_snake:
+            snake_head = self.snake.get_head()
+            # Преобразуем координаты змейки в пиксели
+            target_x = MARGIN + snake_head[0] * CELL_SIZE + CELL_SIZE // 2
+            target_y = MARGIN + snake_head[1] * CELL_SIZE + CELL_SIZE // 2
+
+            # Плавное следование камеры (интерполяция)
+            lerp_speed = 5.0  # Скорость следования
+            self.camera_x += (target_x - self.camera_x) * \
+                lerp_speed * delta_time
+            self.camera_y += (target_y - self.camera_y) * \
+                lerp_speed * delta_time
+
         # Обновление сообщений об изменении очков
         for msg in self.score_messages[:]:
             msg['life'] -= delta_time
@@ -571,29 +1216,34 @@ class GameView(arcade.View):
 
         # Обновление падающих фигур
         self.fall_timer += delta_time
-        if self.fall_timer >= self.fall_speed:
+
+        # Проверяем задержку после появления фигуры (только один раз в самом верху)
+        piece_can_fall = True
+        if self.current_piece and not self.piece_spawn_delay_applied:
+            piece_y = self.current_piece.get_y()
+            # Задержка применяется только если фигура в самом верху (y >= GRID_HEIGHT - 1)
+            if piece_y >= GRID_HEIGHT - 1:
+                if PIECE_SPAWN_DELAY_CYCLES > 0:
+                    # Используем задержку в циклах
+                    if self.piece_spawn_delay_cycles < PIECE_SPAWN_DELAY_CYCLES:
+                        self.piece_spawn_delay_cycles += 1
+                        piece_can_fall = False  # Пропускаем обновление падения фигуры
+                    else:
+                        self.piece_spawn_delay_cycles = 0
+                        self.piece_spawn_delay_applied = True  # Задержка применена
+                else:
+                    # Используем задержку по времени
+                    if self.piece_spawn_delay_timer < PIECE_SPAWN_DELAY:
+                        self.piece_spawn_delay_timer += delta_time
+                        piece_can_fall = False  # Пропускаем обновление падения фигуры
+                    else:
+                        self.piece_spawn_delay_timer = 0.0
+                        self.piece_spawn_delay_applied = True  # Задержка применена
+
+        if piece_can_fall and self.fall_timer >= self.fall_speed:
             self.fall_timer = 0.0
 
-            # Автоматическое позиционирование для заполнения рядов
-            if self.current_piece:
-                best_row, max_filled = self.find_best_target_row()
-                # Если есть ряд, который заполнен хотя бы на 40%, пытаемся его заполнить
-                if best_row >= 0 and max_filled >= int(GRID_WIDTH * 0.4):
-                    # Находим лучшую позицию для фигуры
-                    desired_x = self.find_best_position_for_piece(
-                        self.current_piece, best_row)
-                    current_x = self.current_piece.get_x()
-
-                    # Плавно сдвигаем фигуру к целевой позиции (постепенно, не резко)
-                    if desired_x != current_x:
-                        dx = 1 if desired_x > current_x else -1
-                        # Сдвигаем только если разница значительная или фигура еще высоко
-                        piece_y = self.current_piece.get_y()
-                        if abs(desired_x - current_x) > 0 and piece_y > GRID_HEIGHT - 10:
-                            # Пытаемся сдвинуть, проверяя валидность
-                            if self.is_valid_position(self.current_piece, dx, 0):
-                                self.current_piece.move(dx, 0)
-
+            # Фигуры падают только вниз, без автоматического позиционирования по X
             if not self.move_piece(0, -1):
                 # Если не можем двигаться вниз, фиксируем фигуру
                 self.lock_piece()
@@ -610,17 +1260,36 @@ class GameView(arcade.View):
             # Двигаем змейку (направление может измениться внутри move)
             self.snake.move(grow=False)
 
-            # Проверяем яблоко ПОСЛЕ движения, используя реальную новую позицию головы
+            # Проверяем яблоко ПОСЛЕ движения - проверяем точное совпадение координат сетки
             new_head = self.snake.get_head()
-            if self.apple and new_head == self.apple.get_position():
-                # Яблоко съедено - змейка должна вырасти
-                # Возвращаем удаленный хвост, чтобы змейка выросла
-                if old_tail:
-                    self.snake.body.append(old_tail)
-                apple_x, apple_y = self.apple.get_position()
-                self.score += 100
-                self.add_score_message(100, apple_x, apple_y)
-                self.spawn_apple()
+            if self.apple:
+                apple_pos = self.apple.get_position()
+                # Проверяем точное совпадение координат сетки (не спрайтов)
+                if new_head == apple_pos:
+                    # Яблоко съедено - змейка должна вырасти
+                    # Возвращаем удаленный хвост, чтобы змейка выросла
+                    if old_tail:
+                        self.snake.body.append(old_tail)
+                    apple_x, apple_y = self.apple.get_position()
+                    self.score += 100
+                    self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                    self.check_and_update_high_score()  # Проверяем и обновляем рекорд
+                    self.add_score_message(100, apple_x, apple_y)
+
+                    # Звук съедания яблока
+                    if self.sound_eat_apple:
+                        arcade.play_sound(self.sound_eat_apple, volume=0.7)
+
+                    # Частицы при съедании яблока
+                    pixel_x = self.apple.center_x
+                    pixel_y = self.apple.center_y
+                    self.particle_system.add_apple_particles(
+                        pixel_x, pixel_y, count=15)
+
+                    # Анимация вращения яблока перед исчезновением
+                    self.apple.start_rotation()
+
+                    self.spawn_apple()
 
             # Проверяем столкновения
             if self.check_snake_collision():
@@ -714,32 +1383,64 @@ class GameView(arcade.View):
 
     def on_key_press(self, key, modifiers):
         """Обработка нажатий клавиш для управления змейкой"""
-        if key == arcade.key.W:
+        if key == arcade.key.W or key == arcade.key.UP:
             self.snake.change_direction(0)  # Вверх
-        elif key == arcade.key.D:
+        elif key == arcade.key.D or key == arcade.key.RIGHT:
             self.snake.change_direction(1)  # Вправо
-        elif key == arcade.key.S:
+        elif key == arcade.key.S or key == arcade.key.DOWN:
             self.snake.change_direction(2)  # Вниз
-        elif key == arcade.key.A:
+        elif key == arcade.key.A or key == arcade.key.LEFT:
             self.snake.change_direction(3)  # Влево
 
     def draw_apple(self):
-        """Отрисовка яблока"""
+        """Отрисовка яблока (спрайт)"""
         if self.apple:
-            self.apple.draw()
+            self.apple_sprite_list.draw()
 
     def on_draw(self):
         """Отрисовка игры"""
         self.clear()
 
+        # Применяем камеру, если включено следование за змейкой
+        if self.camera_follow_snake:
+            # Устанавливаем позицию камеры (центрируем на змейке)
+            # В arcade Camera2D позиция камеры - это точка в мировых координатах,
+            # которая будет отображаться в центре экрана
+            # camera_x и camera_y уже содержат позицию змейки в пикселях
+            # Просто устанавливаем позицию камеры равной позиции змейки
+            self._camera.position = (self.camera_x, self.camera_y)
+            self._camera.zoom = self.camera_zoom
+
+            # Активируем камеру
+            self._camera.use()
+
         self.draw_grid()
         self.draw_blocks()
+        # Отрисовка спрайтов блоков
+        self.block_sprites.draw()
         self.draw_apple()
         self.snake.draw()
 
+        # Отрисовка системы частиц
+        self.particle_system.draw()
+
+        # Отключаем камеру для UI элементов - используем камеру по умолчанию
+        if self.camera_follow_snake:
+            # Возвращаемся к обычному виду через UI камеру
+            self._ui_camera.use()
+
+        # UI элементы отрисовываются без трансформации камеры
         score_text = f"Счет: {self.score}"
         arcade.draw_text(score_text, 10, SCREEN_HEIGHT -
                          30, arcade.color.WHITE, 16)
+        
+        # Отображаем рекорд справа от счёта жёлтым цветом
+        high_score_text = f"Рекорд: {self.high_score}"
+        # Вычисляем позицию справа от счёта (примерная ширина текста счёта + отступ)
+        score_text_width = len(score_text) * 10  # Примерная ширина символа
+        high_score_x = 10 + score_text_width + 30  # Отступ 30 пикселей
+        arcade.draw_text(high_score_text, high_score_x, SCREEN_HEIGHT -
+                         30, arcade.color.YELLOW, 16)
 
         # Отрисовка сообщений об изменении очков
         for msg in self.score_messages:
