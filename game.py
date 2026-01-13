@@ -4,6 +4,7 @@ import random
 import json
 import os
 import pymunk
+import copy
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
     MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS,
@@ -78,9 +79,8 @@ class GameView(arcade.View):
         self.piece_spawn_delay_applied = False  # Флаг, что задержка уже применена
         self.score = 0
 
-        # Инициализация змейки в случайной позиции
-        snake_x = random.randint(5, GRID_WIDTH - 5)
-        snake_y = random.randint(5, GRID_HEIGHT - 5)
+        # Инициализация змейки в безопасной позиции
+        snake_x, snake_y = self._find_safe_snake_spawn()
         self.snake = Snake(snake_x, snake_y)
         self.snake_timer = 0.0
 
@@ -184,6 +184,185 @@ class GameView(arcade.View):
                         continue
         except:
             pass  # Если звуки не загрузились, продолжаем без них
+
+    def _find_safe_snake_spawn(self):
+        """Находит безопасную позицию для спавна змейки
+        Проверяет, что змейка не спавнится:
+        - слишком близко к стенам в направлении движения (вправо)
+        - под падающим блоком или перед ним
+        - в области с блоками на сетке
+        """
+        # Змейка изначально движется вправо (direction = 1)
+        # Минимальные отступы от стен для безопасности
+        min_distance_from_right = 6  # От правой стены (направление движения)
+        min_distance_from_left = 3   # От левой стены
+        min_distance_from_top = 4    # От верхней стены
+        min_distance_from_bottom = 3  # От нижней стены
+        
+        # Змейка имеет длину 3, поэтому нужно учесть это
+        snake_length = 3
+        
+        max_attempts = 500
+        for attempt in range(max_attempts):
+            # Генерируем случайную позицию с учетом минимальных отступов
+            snake_x = random.randint(
+                min_distance_from_left,
+                GRID_WIDTH - min_distance_from_right - snake_length
+            )
+            snake_y = random.randint(
+                min_distance_from_bottom,
+                GRID_HEIGHT - min_distance_from_top
+            )
+            
+            # Проверяем, что позиция безопасна
+            if self._is_safe_spawn_position(snake_x, snake_y):
+                return snake_x, snake_y
+        
+        # Если не нашли безопасную позицию после всех попыток,
+        # возвращаем позицию по умолчанию (центр поля с отступами)
+        default_x = max(min_distance_from_left, 
+                       min(GRID_WIDTH - min_distance_from_right - snake_length,
+                           GRID_WIDTH // 2 - snake_length // 2))
+        default_y = max(min_distance_from_bottom,
+                       min(GRID_HEIGHT - min_distance_from_top,
+                           GRID_HEIGHT // 2))
+        return default_x, default_y
+
+    def _is_safe_spawn_position(self, snake_x, snake_y):
+        """Проверяет, является ли позиция безопасной для спавна змейки"""
+        # Змейка имеет длину 3 и движется вправо
+        # Тело змейки: [(x, y), (x-1, y), (x-2, y)]
+        snake_body = [(snake_x, snake_y), (snake_x - 1, snake_y), (snake_x - 2, snake_y)]
+        
+        # Проверяем каждую часть тела змейки
+        for x, y in snake_body:
+            # Проверяем границы
+            if x < 0 or x >= GRID_WIDTH or y < 0 or y >= GRID_HEIGHT:
+                return False
+            
+            # Проверяем, что нет блоков на сетке
+            if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
+                if self.grid[y][x] is not None:
+                    return False
+        
+        # Проверяем, что в направлении движения (вправо) есть достаточно места
+        # Проверяем следующие 5 клеток вправо от головы
+        safe_distance_ahead = 5
+        for i in range(1, safe_distance_ahead + 1):
+            check_x = snake_x + i
+            check_y = snake_y
+            
+            # Если вышли за границы - это плохо (слишком близко к стене)
+            if check_x >= GRID_WIDTH:
+                return False
+            
+            # Проверяем, что впереди нет блоков
+            if 0 <= check_y < GRID_HEIGHT and 0 <= check_x < GRID_WIDTH:
+                if self.grid[check_y][check_x] is not None:
+                    return False
+        
+        # Проверяем, что нет падающей фигуры в опасной близости
+        # (хотя при инициализации current_piece еще None, но на всякий случай)
+        if self.current_piece:
+            piece_positions = self.current_piece.get_positions()
+            # Проверяем, не пересекается ли змейка с падающей фигурой
+            for snake_x_pos, snake_y_pos in snake_body:
+                if (snake_x_pos, snake_y_pos) in piece_positions:
+                    return False
+            
+            # Проверяем, не находится ли падающая фигура прямо над змейкой
+            # или в опасной близости впереди
+            piece_min_y = min(py for px, py in piece_positions)
+            piece_max_x = max(px for px, py in piece_positions)
+            piece_min_x = min(px for px, py in piece_positions)
+            
+            # Если фигура находится над змейкой (по Y) и может упасть на нее
+            if piece_min_y > snake_y:
+                # Проверяем, не находится ли фигура в опасной близости по X
+                if not (piece_max_x < snake_x - 2 or piece_min_x > snake_x + safe_distance_ahead):
+                    return False
+        
+        # Проверяем, что есть место для маневра вверх и вниз
+        # (чтобы игрок мог повернуть, если нужно)
+        if snake_y + 2 >= GRID_HEIGHT or snake_y - 2 < 0:
+            return False
+        
+        # Проверяем, что сверху и снизу нет блоков в опасной близости
+        for offset_y in [-2, -1, 1, 2]:
+            check_y = snake_y + offset_y
+            if 0 <= check_y < GRID_HEIGHT:
+                # Проверяем позиции тела змейки по X
+                for offset_x in [0, -1, -2]:
+                    check_x = snake_x + offset_x
+                    if 0 <= check_x < GRID_WIDTH:
+                        if self.grid[check_y][check_x] is not None:
+                            # Блок слишком близко - небезопасно
+                            return False
+        
+        return True
+
+    def _is_piece_safe_from_snake(self, piece):
+        """Проверяет, не находится ли фигура в опасной позиции относительно змейки
+        Фигура считается опасной, если она:
+        - находится прямо над змейкой или в опасной близости
+        - может упасть на змейку слишком быстро
+        """
+        if not hasattr(self, 'snake') or not self.snake:
+            return True  # Если змейки еще нет, позиция безопасна
+        
+        piece_positions = piece.get_positions()
+        snake_body = self.snake.get_body()
+        snake_head = self.snake.get_head()
+        snake_x, snake_y = snake_head
+        
+        # Находим границы фигуры
+        piece_min_x = min(px for px, py in piece_positions)
+        piece_max_x = max(px for px, py in piece_positions)
+        piece_min_y = min(py for px, py in piece_positions)
+        piece_max_y = max(py for px, py in piece_positions)
+        
+        # Находим границы змейки
+        snake_min_x = min(sx for sx, sy in snake_body)
+        snake_max_x = max(sx for sx, sy in snake_body)
+        snake_min_y = min(sy for sx, sy in snake_body)
+        snake_max_y = max(sy for sx, sy in snake_body)
+        
+        # Проверяем, не находится ли фигура прямо над змейкой
+        # (по X координате пересекается с змейкой)
+        x_overlap = not (piece_max_x < snake_min_x - 1 or piece_min_x > snake_max_x + 1)
+        
+        if x_overlap:
+            # Если есть пересечение по X, проверяем расстояние по Y
+            # Фигура находится вверху (y = GRID_HEIGHT - 1), змейка ниже
+            # Вычисляем минимальное расстояние по Y между фигурой и змейкой
+            # (фигура выше змейки, поэтому piece_min_y > snake_max_y)
+            vertical_distance = piece_min_y - snake_max_y
+            
+            # Если расстояние слишком маленькое (меньше 8 клеток), это опасно
+            # Игрок должен иметь время среагировать
+            if vertical_distance < 8:
+                return False
+        
+        # Проверяем, не находится ли фигура в опасной близости впереди змейки
+        # (змейка движется вправо, поэтому проверяем справа от змейки)
+        # Если фигура находится справа от змейки и может упасть на ее путь
+        if piece_min_x >= snake_max_x:
+            # Фигура справа от змейки
+            horizontal_distance = piece_min_x - snake_max_x
+            # Если фигура слишком близко (меньше 3 клеток) и может упасть на путь змейки
+            if horizontal_distance < 3 and x_overlap:
+                return False
+        
+        # Проверяем, не находится ли фигура слишком близко по диагонали
+        # (может упасть на змейку при движении)
+        if x_overlap:
+            # Если фигура находится в опасной зоне (может упасть на змейку быстро)
+            # Проверяем, что есть достаточно времени для реакции
+            min_safe_distance = 6  # Минимальное безопасное расстояние
+            if vertical_distance < min_safe_distance:
+                return False
+        
+        return True
 
     def find_best_target_row(self):
         """Находит лучший ряд для заполнения (приоритет рядам, близким к завершению)"""
@@ -418,6 +597,31 @@ class GameView(arcade.View):
         rotations = random.randint(0, 3)
         for _ in range(rotations):
             self.current_piece.rotate()
+
+        # Проверяем, не находится ли фигура в опасной позиции относительно змейки
+        # Если да, пытаемся найти безопасную позицию
+        if not self._is_piece_safe_from_snake(self.current_piece):
+            # Пытаемся найти безопасную позицию
+            safe_found = False
+            for attempt in range(50):  # Максимум 50 попыток
+                # Пробуем разные X позиции
+                test_x = random.randint(2, GRID_WIDTH - 3)
+                self.current_piece.x = test_x
+                self.current_piece.y = GRID_HEIGHT - 1
+                
+                # Пробуем разные повороты
+                test_rotations = random.randint(0, 3)
+                # Сбрасываем поворот
+                self.current_piece.shape = copy.deepcopy(TETROMINOES[piece_type])
+                for _ in range(test_rotations):
+                    self.current_piece.rotate()
+                
+                if self._is_piece_safe_from_snake(self.current_piece):
+                    safe_found = True
+                    break
+            
+            # Если не нашли безопасную позицию, оставляем как есть
+            # (лучше чем ничего, и задержка спавна даст время игроку)
 
         # Сбрасываем таймер задержки после появления
         self.piece_spawn_delay_timer = 0.0
