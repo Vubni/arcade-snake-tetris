@@ -1382,13 +1382,13 @@ class GameView(arcade.View):
 
     def on_key_press(self, key, modifiers):
         """Обработка нажатий клавиш для управления змейкой"""
-        if key == arcade.key.W:
+        if key == arcade.key.W or key == arcade.key.UP:
             self.snake.change_direction(0)  # Вверх
-        elif key == arcade.key.D:
+        elif key == arcade.key.D or key == arcade.key.RIGHT:
             self.snake.change_direction(1)  # Вправо
-        elif key == arcade.key.S:
+        elif key == arcade.key.S or key == arcade.key.DOWN:
             self.snake.change_direction(2)  # Вниз
-        elif key == arcade.key.A:
+        elif key == arcade.key.A or key == arcade.key.LEFT:
             self.snake.change_direction(3)  # Влево
 
     def draw_apple(self):
