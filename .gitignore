@@ -33,3 +33,4 @@ pytest_cache/
 *.7z
 **/__pycache__/
 **/*.pyc
+*.spec
