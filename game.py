@@ -8,7 +8,7 @@ import copy
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
     MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS,
-    PIECE_SPAWN_DELAY, PIECE_SPAWN_DELAY_CYCLES
+    PIECE_SPAWN_DELAY, PIECE_SPAWN_DELAY_CYCLES, COLUMN_CLEAR_THRESHOLD
 )
 from snake import Snake
 from tetromino import Tetromino
@@ -78,6 +78,8 @@ class GameView(arcade.View):
         self.piece_spawn_delay_cycles = 0
         self.piece_spawn_delay_applied = False  # Флаг, что задержка уже применена
         self.score = 0
+        self.max_score = 0  # Максимальный счёт за игру (для рекорда)
+        self.high_score = load_high_score()  # Загружаем текущий рекорд
 
         # Инициализация змейки в безопасной позиции
         snake_x, snake_y = self._find_safe_snake_spawn()
@@ -849,6 +851,8 @@ class GameView(arcade.View):
                 # Отнимаем 50 очков (не меньше 0)
                 apple_x, apple_y = apple_pos
                 self.score = max(0, self.score - 50)
+                self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                 self.add_score_message(-50, apple_x, apple_y)
                 # Частицы при раздавливании яблока
                 pixel_x = MARGIN + apple_x * CELL_SIZE + CELL_SIZE // 2
@@ -877,6 +881,7 @@ class GameView(arcade.View):
                     pixel_x, pixel_y, self.current_piece.get_color(), count=5)
 
         self.clear_lines()
+        self.clear_columns()
 
         # Увеличиваем счетчик фигур и постепенно ускоряем падение
         self.pieces_count += 1
@@ -929,6 +934,8 @@ class GameView(arcade.View):
         if lines_cleared > 0:
             score_gain = lines_cleared * 100
             self.score = max(0, self.score + score_gain)
+            self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+            self.check_and_update_high_score()  # Проверяем и обновляем рекорд
             self.add_score_message(score_gain)
 
             # Звук очистки линии
@@ -946,6 +953,88 @@ class GameView(arcade.View):
             for sprite in self.block_sprites:
                 sprite.center_y = MARGIN + sprite.grid_y * CELL_SIZE + CELL_SIZE // 2
 
+    def clear_columns(self):
+        """Удаляет заполненные столбцы (если в столбце COLUMN_CLEAR_THRESHOLD или больше блоков подряд снизу)"""
+        columns_cleared = 0
+        cleared_columns = []
+
+        # Проверяем каждый столбец
+        for x in range(GRID_WIDTH):
+            # Считаем количество блоков подряд снизу вверх
+            blocks_count = 0
+            for y in range(GRID_HEIGHT):
+                if self.grid[y][x] is not None:
+                    blocks_count += 1
+                else:
+                    # Если встретили пустую клетку, прерываем подсчёт
+                    break
+
+            # Если в столбце COLUMN_CLEAR_THRESHOLD или больше блоков подряд снизу
+            if blocks_count >= COLUMN_CLEAR_THRESHOLD:
+                cleared_columns.append(x)
+                columns_cleared += 1
+
+                # Собираем цвет для частиц (берём цвет первого блока снизу)
+                column_color = self.grid[0][x] if self.grid[0][x] else (255, 255, 255)
+
+                # Удаляем спрайты блоков, которые находятся в удаляемых позициях (первые blocks_count снизу)
+                sprites_to_remove = []
+                for sprite in self.block_sprites:
+                    if sprite.grid_x == x and sprite.grid_y < blocks_count:
+                        # Частицы при удалении блока
+                        pixel_x = sprite.center_x
+                        pixel_y = sprite.center_y
+                        self.particle_system.add_line_clear_particles(
+                            pixel_x, pixel_y, column_color, count=3
+                        )
+                        sprites_to_remove.append(sprite)
+
+                for sprite in sprites_to_remove:
+                    self.block_sprites.remove(sprite)
+
+                # Удаляем блоки из столбца (снизу вверх, blocks_count штук)
+                for y in range(blocks_count):
+                    if y < GRID_HEIGHT:
+                        self.grid[y][x] = None
+
+                # Сдвигаем все блоки выше удалённых вниз
+                # Создаём временный список для столбца
+                column_blocks = []
+                for y in range(blocks_count, GRID_HEIGHT):
+                    column_blocks.append(self.grid[y][x])
+                    self.grid[y][x] = None
+
+                # Вставляем блоки обратно, начиная снизу
+                for i, block in enumerate(column_blocks):
+                    if block is not None:
+                        self.grid[i][x] = block
+
+                # Обновляем позиции спрайтов в этом столбце (только тех, что выше удалённых)
+                for sprite in self.block_sprites:
+                    if sprite.grid_x == x and sprite.grid_y >= blocks_count:
+                        sprite.grid_y = sprite.grid_y - blocks_count
+                        sprite.center_y = MARGIN + sprite.grid_y * CELL_SIZE + CELL_SIZE // 2
+
+        # Начисляем очки за очищенные столбцы
+        if columns_cleared > 0:
+            score_gain = columns_cleared * 150  # Больше очков за столбцы, чем за линии
+            self.score = max(0, self.score + score_gain)
+            self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+            self.check_and_update_high_score()  # Проверяем и обновляем рекорд
+            self.add_score_message(score_gain)
+
+            # Звук очистки столбца
+            if self.sound_line_clear:
+                arcade.play_sound(self.sound_line_clear, volume=0.5)
+
+            # Частицы для каждого очищенного столбца
+            for col_x in cleared_columns:
+                center_x = MARGIN + col_x * CELL_SIZE + CELL_SIZE // 2
+                center_y = MARGIN + (COLUMN_CLEAR_THRESHOLD // 2) * CELL_SIZE + CELL_SIZE // 2
+                column_color = (255, 200, 0)  # Золотистый цвет для столбцов
+                self.particle_system.add_line_clear_particles(
+                    center_x, center_y, column_color, count=30)
+
     def move_piece(self, dx, dy):
         """Перемещает фигуру"""
         if self.is_valid_position(self.current_piece, dx, dy):
@@ -959,6 +1048,8 @@ class GameView(arcade.View):
                     # Яблоко раздавлено
                     apple_x, apple_y = apple_pos
                     self.score = max(0, self.score - 50)
+                    self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                    self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                     self.add_score_message(-50, apple_x, apple_y)
                     self.apple = None
                     self.spawn_apple()
@@ -1016,9 +1107,11 @@ class GameView(arcade.View):
                         if len(self.snake.body) < 3:
                             # Игра заканчивается - змейка слишком короткая
                             return True
-                        # Снимаем по 50 очков за каждый отрубленный кусок
-                        score_loss = removed_count * 50
+                        # Снимаем по 25 очков за каждый отрубленный кусок
+                        score_loss = removed_count * 25
                         self.score = max(0, self.score - score_loss)
+                        self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                        self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                         # Показываем изменение очков
                         self.add_score_message(-score_loss, snake_x, snake_y)
                         # Частицы при обрезании
@@ -1029,6 +1122,12 @@ class GameView(arcade.View):
                     break  # Обрабатываем только первое касание
 
         return False
+
+    def check_and_update_high_score(self):
+        """Проверяет и обновляет рекорд, если текущий максимальный счёт больше"""
+        if self.max_score > self.high_score:
+            self.high_score = self.max_score
+            save_high_score(self.high_score)
 
     def add_score_message(self, score_change, x=None, y=None):
         """Добавляет сообщение об изменении очков (всегда показываем сверху по центру)"""
@@ -1063,10 +1162,11 @@ class GameView(arcade.View):
         if self.sound_game_over:
             arcade.play_sound(self.sound_game_over, volume=0.8)
 
-        # Обновляем рекорд, если текущий счёт больше
-        high_score = load_high_score()
-        if self.score > high_score:
-            save_high_score(self.score)
+        # Обновляем рекорд, если максимальный счёт за игру больше
+        # (используем max_score, а не финальный score)
+        if self.max_score > self.high_score:
+            self.high_score = self.max_score
+            save_high_score(self.high_score)
 
         from menu import GameOverView
         game_over_view = GameOverView(self.score)
@@ -1171,6 +1271,8 @@ class GameView(arcade.View):
                         self.snake.body.append(old_tail)
                     apple_x, apple_y = self.apple.get_position()
                     self.score += 100
+                    self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
+                    self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                     self.add_score_message(100, apple_x, apple_y)
 
                     # Звук съедания яблока
@@ -1330,6 +1432,14 @@ class GameView(arcade.View):
         score_text = f"Счет: {self.score}"
         arcade.draw_text(score_text, 10, SCREEN_HEIGHT -
                          30, arcade.color.WHITE, 16)
+        
+        # Отображаем рекорд справа от счёта жёлтым цветом
+        high_score_text = f"Рекорд: {self.high_score}"
+        # Вычисляем позицию справа от счёта (примерная ширина текста счёта + отступ)
+        score_text_width = len(score_text) * 10  # Примерная ширина символа
+        high_score_x = 10 + score_text_width + 30  # Отступ 30 пикселей
+        arcade.draw_text(high_score_text, high_score_x, SCREEN_HEIGHT -
+                         30, arcade.color.YELLOW, 16)
 
         # Отрисовка сообщений об изменении очков
         for msg in self.score_messages:
