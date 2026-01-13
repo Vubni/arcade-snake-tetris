@@ -34,3 +34,4 @@ pytest_cache/
 **/__pycache__/
 **/*.pyc
 *.spec
+create_exe.py
