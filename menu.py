@@ -332,7 +332,7 @@ class SettingsView(arcade.View):
         # Кнопка камеры
         self.camera_button = ToggleButton(
             SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50,
-            400, 60,
+            450, 60,
             "Камера следует за змейкой",
             (100, 100, 150),
             (130, 130, 200),

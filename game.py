@@ -8,7 +8,8 @@ import copy
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
     MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS,
-    PIECE_SPAWN_DELAY, PIECE_SPAWN_DELAY_CYCLES, COLUMN_CLEAR_THRESHOLD
+    PIECE_SPAWN_DELAY, PIECE_SPAWN_DELAY_CYCLES, COLUMN_CLEAR_THRESHOLD,
+    POINTS_PER_LINE
 )
 from snake import Snake
 from tetromino import Tetromino
@@ -932,7 +933,7 @@ class GameView(arcade.View):
 
         # Начисляем очки за очищенные линии
         if lines_cleared > 0:
-            score_gain = lines_cleared * 100
+            score_gain = lines_cleared * POINTS_PER_LINE
             self.score = max(0, self.score + score_gain)
             self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
             self.check_and_update_high_score()  # Проверяем и обновляем рекорд
