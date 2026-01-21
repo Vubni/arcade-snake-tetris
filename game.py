@@ -5,6 +5,7 @@ import json
 import os
 import pymunk
 import copy
+from record_service import fetch_record_async, post_record_async
 from constants import (
     SCREEN_WIDTH, SCREEN_HEIGHT, GRID_WIDTH, GRID_HEIGHT,
     MARGIN, CELL_SIZE, COLORS, TETROMINOES, DIFFICULTY_SETTINGS,
@@ -81,6 +82,10 @@ class GameView(arcade.View):
         self.score = 0
         self.max_score = 0  # Максимальный счёт за игру (для рекорда)
         self.high_score = load_high_score()  # Загружаем текущий рекорд
+        self._last_posted_record = 0  # чтобы не спамить сервер одинаковыми значениями
+
+        # Пробуем получить рекорд с сервера (не блокируя игру)
+        self._try_load_remote_record()
 
         # Инициализация змейки в безопасной позиции
         snake_x, snake_y = self._find_safe_snake_spawn()
@@ -138,6 +143,44 @@ class GameView(arcade.View):
 
         # Анимация для фигур
         self.piece_animation_timer = 0.0
+
+    def _try_load_remote_record(self):
+        """Пытается подтянуть рекорд с сервера в фоне.
+        Если серверный рекорд загрузился - используем его (приоритет серверу).
+        Если не загрузился - используем локальный."""
+
+        def _on_result(remote_record):
+            try:
+                # Проверяем, что серверный рекорд был успешно получен
+                if remote_record is not None and isinstance(remote_record, int) and remote_record >= 0:
+                    # Используем серверный рекорд (приоритет серверу)
+                    # Это источник истины, даже если он меньше локального
+                    self.high_score = remote_record
+                    # Сохраняем в локальный файл как кэш
+                    save_high_score(self.high_score)
+            except Exception:
+                # Если ошибка - оставляем локальный рекорд (уже загружен в self.high_score)
+                pass
+
+        try:
+            fetch_record_async(_on_result)
+        except Exception:
+            # Если не удалось запустить запрос - используем локальный рекорд
+            pass
+
+    def _try_post_record(self, record: int):
+        """Отправляет рекорд на сервер в фоне (с защитой от повторов)."""
+        try:
+            if not isinstance(record, int):
+                return
+            if record <= 0:
+                return
+            if record <= self._last_posted_record:
+                return
+            self._last_posted_record = record
+            post_record_async(record)
+        except Exception:
+            pass
 
     def load_sounds(self):
         """Загружает звуки игры"""
@@ -1326,6 +1369,8 @@ class GameView(arcade.View):
         if self.max_score > self.high_score:
             self.high_score = self.max_score
             save_high_score(self.high_score)
+            # Отправляем новый рекорд на сервер (в фоне)
+            self._try_post_record(self.high_score)
 
     def add_score_message(self, score_change, x=None, y=None):
         """Добавляет сообщение об изменении очков (всегда показываем сверху по центру)"""
@@ -1365,6 +1410,11 @@ class GameView(arcade.View):
         if self.max_score > self.high_score:
             self.high_score = self.max_score
             save_high_score(self.high_score)
+            self._try_post_record(self.high_score)
+        else:
+            # Даже если локальный рекорд не обновили, всё равно попробуем отправить
+            # максимальный счёт за игру (сервер может иметь меньший рекорд).
+            self._try_post_record(self.max_score)
 
         from menu import GameOverView
         game_over_view = GameOverView(self.score)
