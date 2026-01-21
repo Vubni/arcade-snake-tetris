@@ -1,5 +1,12 @@
 """Главный файл запуска игры"""
+import warnings
+# Подавляем предупреждение о медленном draw_text
+warnings.filterwarnings("ignore", message=".*draw_text.*")
+
 import arcade
+# Примечание: Ошибка "Unable to load version number via VERSION" при запуске .exe
+# не критична и не влияет на работу игры. Она возникает из-за особенностей
+# работы PyInstaller с ресурсами arcade, но игра функционирует нормально.
 from menu import MainMenuView
 from constants import SCREEN_WIDTH, SCREEN_HEIGHT
 
