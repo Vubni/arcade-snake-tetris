@@ -156,6 +156,8 @@ class GameView(arcade.View):
                     # Используем серверный рекорд (приоритет серверу)
                     # Это источник истины, даже если он меньше локального
                     self.high_score = remote_record
+                    # Обновляем последний отправленный рекорд, чтобы не отправлять меньшие значения
+                    self._last_posted_record = remote_record
                     # Сохраняем в локальный файл как кэш
                     save_high_score(self.high_score)
             except Exception:
@@ -169,14 +171,18 @@ class GameView(arcade.View):
             pass
 
     def _try_post_record(self, record: int):
-        """Отправляет рекорд на сервер в фоне (с защитой от повторов)."""
+        """Отправляет рекорд на сервер в фоне (с защитой от повторов).
+        Отправляет только если рекорд больше текущего рекорда с сервера."""
         try:
             if not isinstance(record, int):
                 return
             if record <= 0:
                 return
-            if record <= self._last_posted_record:
+            # Отправляем только если рекорд больше последнего полученного с сервера
+            # (self.high_score содержит рекорд с сервера после загрузки)
+            if record <= self.high_score:
                 return
+            # Обновляем последний отправленный рекорд
             self._last_posted_record = record
             post_record_async(record)
         except Exception:
