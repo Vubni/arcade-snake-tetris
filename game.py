@@ -70,6 +70,7 @@ class GameView(arcade.View):
             difficulty, DIFFICULTY_SETTINGS['medium'])
         self.fall_speed = difficulty_config['fall_speed']
         self.snake_speed = difficulty_config['snake_speed']
+        self.spawn_delay = difficulty_config.get('spawn_delay', PIECE_SPAWN_DELAY)
 
         self.grid = [[None for _ in range(GRID_WIDTH)]
                      for _ in range(GRID_HEIGHT)]
@@ -95,6 +96,12 @@ class GameView(arcade.View):
         # Яблоко (теперь спрайт)
         self.apple = None
         self.apple_sprite_list = arcade.SpriteList()
+        # Защита от частых пересозданий яблока
+        self.apple_spawn_timer = 0.0
+        self.apple_spawn_cooldown = 0.5  # Минимальный интервал между пересозданиями (0.5 секунды)
+        self.apple_spawn_attempts = 0  # Счетчик попыток пересоздания
+        self.apple_spawn_max_attempts = 5  # Максимум попыток подряд без проверки доступности
+        self.apple_last_spawn_time = 0.0  # Время последнего спавна
         self.spawn_apple()
 
         self.spawn_new_piece()
@@ -153,6 +160,7 @@ class GameView(arcade.View):
             try:
                 # Проверяем, что серверный рекорд был успешно получен
                 if remote_record is not None and isinstance(remote_record, int) and remote_record >= 0:
+                    print(f"[Игра] Получен рекорд с сервера: {remote_record}, текущий локальный: {self.high_score}")
                     # Используем серверный рекорд (приоритет серверу)
                     # Это источник истины, даже если он меньше локального
                     self.high_score = remote_record
@@ -160,33 +168,56 @@ class GameView(arcade.View):
                     self._last_posted_record = remote_record
                     # Сохраняем в локальный файл как кэш
                     save_high_score(self.high_score)
-            except Exception:
+                    print(f"[Игра] Рекорд обновлён: {self.high_score}")
+                else:
+                    print(f"[Игра] Не удалось получить рекорд с сервера (получено: {remote_record}), используем локальный: {self.high_score}")
+            except Exception as e:
                 # Если ошибка - оставляем локальный рекорд (уже загружен в self.high_score)
-                pass
+                print(f"[Игра] Ошибка при обработке рекорда с сервера: {type(e).__name__}: {e}")
 
         try:
+            print(f"[Игра] Запрос рекорда с сервера...")
             fetch_record_async(_on_result)
-        except Exception:
+        except Exception as e:
             # Если не удалось запустить запрос - используем локальный рекорд
-            pass
+            print(f"[Игра] Ошибка при запуске запроса рекорда: {type(e).__name__}: {e}")
 
     def _try_post_record(self, record: int):
         """Отправляет рекорд на сервер в фоне (с защитой от повторов).
         Отправляет только если рекорд больше текущего рекорда с сервера."""
         try:
             if not isinstance(record, int):
+                print(f"[Игра] Ошибка: неверный тип рекорда для отправки: {type(record)}")
                 return
             if record <= 0:
+                print(f"[Игра] Пропуск отправки: рекорд <= 0: {record}")
                 return
             # Отправляем только если рекорд больше последнего полученного с сервера
             # (self.high_score содержит рекорд с сервера после загрузки)
             if record <= self.high_score:
+                print(f"[Игра] Пропуск отправки: рекорд {record} не больше текущего рекорда {self.high_score}")
+                return
+            # Не отправляем повторно, если уже отправляли этот рекорд
+            if record <= self._last_posted_record:
+                print(f"[Игра] Пропуск отправки: рекорд {record} уже был отправлен (последний отправленный: {self._last_posted_record})")
                 return
             # Обновляем последний отправленный рекорд
             self._last_posted_record = record
-            post_record_async(record)
-        except Exception:
-            pass
+            print(f"[Игра] Отправка рекорда {record} на сервер...")
+            
+            def on_post_done(success: bool):
+                if success:
+                    print(f"[Игра] Рекорд {record} успешно отправлен на сервер")
+                    # Обновляем high_score, чтобы не пытаться отправить снова
+                    if record > self.high_score:
+                        self.high_score = record
+                        save_high_score(self.high_score)
+                else:
+                    print(f"[Игра] Не удалось отправить рекорд {record} на сервер")
+            
+            post_record_async(record, on_done=on_post_done)
+        except Exception as e:
+            print(f"[Игра] Ошибка при попытке отправить рекорд: {type(e).__name__}: {e}")
 
     def load_sounds(self):
         """Загружает звуки игры"""
@@ -877,7 +908,30 @@ class GameView(arcade.View):
 
         return escape_found
 
-    def spawn_apple(self):
+    def _safe_spawn_apple(self, delta_time):
+        """Защищенный метод для спавна яблока с ограничением частоты вызовов"""
+        # Проверяем, прошло ли достаточно времени с последнего спавна
+        if self.apple_spawn_timer < self.apple_spawn_cooldown:
+            return  # Слишком рано для нового спавна
+        
+        # Если превышен лимит попыток, пропускаем проверку доступности
+        skip_accessibility_check = (self.apple_spawn_attempts >= self.apple_spawn_max_attempts)
+        
+        # Вызываем обычный spawn_apple с флагом пропуска проверки доступности
+        self.spawn_apple(skip_accessibility_check=skip_accessibility_check)
+        
+        # Сбрасываем таймер и обновляем счетчики
+        self.apple_spawn_timer = 0.0
+        self.apple_last_spawn_time = 0.0
+        
+        # Если яблоко успешно создано и осталось, сбрасываем счетчик попыток
+        if self.apple:
+            self.apple_spawn_attempts = 0
+        else:
+            # Если яблоко не создано, увеличиваем счетчик попыток
+            self.apple_spawn_attempts += 1
+
+    def spawn_apple(self, skip_accessibility_check=False):
         """Создает яблоко в случайной позиции (не на змейке, не на блоках, не на падающей фигуре, не в верхних 4 линиях, не под падающей фигурой)"""
         try:
             max_attempts = 200
@@ -917,12 +971,15 @@ class GameView(arcade.View):
                     self.apple_sprite_list.append(self.apple)
 
                     # Проверяем доступность яблока (особенно если оно внизу)
-                    if not self.is_apple_accessible(apple_x, apple_y):
-                        # Яблоко недоступно - уничтожаем без снятия очков и создаем новое
-                        self.apple = None
-                        self.apple_sprite_list.clear()
-                        continue
+                    # Пропускаем проверку, если было слишком много неудачных попыток
+                    if not skip_accessibility_check:
+                        if not self.is_apple_accessible(apple_x, apple_y):
+                            # Яблоко недоступно - уничтожаем без снятия очков и создаем новое
+                            self.apple = None
+                            self.apple_sprite_list.clear()
+                            continue
 
+                    # Яблоко успешно создано
                     return
                 except Exception as e:
                     # Если ошибка при создании яблока, пробуем следующую позицию
@@ -949,6 +1006,7 @@ class GameView(arcade.View):
                     self.apple = Apple(apple_x, apple_y)
                     self.apple_sprite_list.clear()
                     self.apple_sprite_list.append(self.apple)
+                    # Яблоко успешно создано
                     return
                 except Exception:
                     continue
@@ -963,6 +1021,8 @@ class GameView(arcade.View):
                                     self.apple = Apple(x, y)
                                     self.apple_sprite_list.clear()
                                     self.apple_sprite_list.append(self.apple)
+                                    # Яблоко успешно создано - сбрасываем счетчик попыток
+                                    self.apple_spawn_attempts = 0
                                     return
                                 except Exception:
                                     continue
@@ -977,6 +1037,8 @@ class GameView(arcade.View):
                             self.apple = Apple(safe_x, safe_y)
                             self.apple_sprite_list.clear()
                             self.apple_sprite_list.append(self.apple)
+                            # Яблоко успешно создано - сбрасываем счетчик попыток
+                            self.apple_spawn_attempts = 0
                             return
             except Exception:
                 pass
@@ -1444,15 +1506,21 @@ class GameView(arcade.View):
                     apple_pos = self.apple.get_position()
                     self.apple = None
                     self.apple_sprite_list.clear()
-                    self.spawn_apple()
+                    # Используем защищенный спавн
+                    self._safe_spawn_apple(delta_time)
                 except Exception:
                     self.apple = None
                     self.apple_sprite_list.clear()
-                    self.spawn_apple()
+                    # Используем защищенный спавн
+                    self._safe_spawn_apple(delta_time)
         
-        # Постоянная проверка наличия яблока - если его нет, спавним
+        # Обновляем таймер спавна яблока
+        self.apple_spawn_timer += delta_time
+        self.apple_last_spawn_time += delta_time
+        
+        # Постоянная проверка наличия яблока - если его нет, спавним (с защитой)
         if self.apple is None:
-            self.spawn_apple()
+            self._safe_spawn_apple(delta_time)
 
         # Обновление анимаций спрайтов блоков
         for sprite in self.block_sprites:
@@ -1501,8 +1569,8 @@ class GameView(arcade.View):
                         self.piece_spawn_delay_cycles = 0
                         self.piece_spawn_delay_applied = True  # Задержка применена
                 else:
-                    # Используем задержку по времени
-                    if self.piece_spawn_delay_timer < PIECE_SPAWN_DELAY:
+                    # Используем задержку по времени (из настроек сложности)
+                    if self.piece_spawn_delay_timer < self.spawn_delay:
                         self.piece_spawn_delay_timer += delta_time
                         piece_can_fall = False  # Пропускаем обновление падения фигуры
                     else:
@@ -1570,12 +1638,14 @@ class GameView(arcade.View):
 
                         self.apple = None
                         self.apple_sprite_list.clear()
-                        self.spawn_apple()
+                        # Используем защищенный спавн
+                        self._safe_spawn_apple(delta_time)
                 except Exception:
                     # Если ошибка при работе с яблоком, пересоздаём его
                     self.apple = None
                     self.apple_sprite_list.clear()
-                    self.spawn_apple()
+                    # Используем защищенный спавн
+                    self._safe_spawn_apple(delta_time)
 
             # Проверяем столкновения
             if self.check_snake_collision():
@@ -1584,19 +1654,22 @@ class GameView(arcade.View):
 
             # Проверяем доступность яблока после каждого обновления
             # (ситуация может измениться, например, упала фигура)
-            if self.apple:
+            # Но только если прошло достаточно времени с последнего спавна
+            if self.apple and self.apple_last_spawn_time >= 0.3:  # Минимум 0.3 секунды после спавна
                 try:
                     apple_pos = self.apple.get_position()
                     if not self.is_apple_accessible(apple_pos[0], apple_pos[1]):
                         # Яблоко стало недоступным - уничтожаем без снятия очков
                         self.apple = None
                         self.apple_sprite_list.clear()
-                        self.spawn_apple()
+                        # Используем защищенный спавн
+                        self._safe_spawn_apple(delta_time)
                 except Exception:
                     # Если ошибка при проверке доступности, пересоздаём яблоко
                     self.apple = None
                     self.apple_sprite_list.clear()
-                    self.spawn_apple()
+                    # Используем защищенный спавн
+                    self._safe_spawn_apple(delta_time)
 
     def draw_grid(self):
         """Отрисовка сетки поля"""
