@@ -979,21 +979,16 @@ class GameView(arcade.View):
                             self.apple_sprite_list.clear()
                             continue
 
-                    # Яблоко успешно создано
                     return
                 except Exception as e:
-                    # Если ошибка при создании яблока, пробуем следующую позицию
                     self.apple = None
                     self.apple_sprite_list.clear()
                     continue
 
-            # Если не нашли место после всех попыток, пробуем с ослабленными требованиями
-            # (только проверяем, что не на змейке и не на блоке, игнорируем фигуру и доступность)
             for attempt in range(500):
                 apple_x = random.randint(0, GRID_WIDTH - 1)
                 apple_y = random.randint(0, GRID_HEIGHT - 5)
 
-                # Проверяем только базовые условия
                 if self.snake.check_collision_with_position(apple_x, apple_y):
                     continue
 
@@ -1001,17 +996,14 @@ class GameView(arcade.View):
                     if self.grid[apple_y][apple_x] is not None:
                         continue
 
-                # Пробуем создать яблоко даже если оно может быть под фигурой
                 try:
                     self.apple = Apple(apple_x, apple_y)
                     self.apple_sprite_list.clear()
                     self.apple_sprite_list.append(self.apple)
-                    # Яблоко успешно создано
                     return
                 except Exception:
                     continue
 
-            # Если всё ещё не получилось, создаём яблоко в любой свободной клетке
             for y in range(GRID_HEIGHT - 5, -1, -1):
                 for x in range(GRID_WIDTH):
                     if not self.snake.check_collision_with_position(x, y):
@@ -1021,13 +1013,11 @@ class GameView(arcade.View):
                                     self.apple = Apple(x, y)
                                     self.apple_sprite_list.clear()
                                     self.apple_sprite_list.append(self.apple)
-                                    # Яблоко успешно создано - сбрасываем счетчик попыток
                                     self.apple_spawn_attempts = 0
                                     return
                                 except Exception:
                                     continue
         except Exception:
-            # В случае любой ошибки пытаемся создать яблоко в безопасном месте
             try:
                 safe_x = GRID_WIDTH // 2
                 safe_y = GRID_HEIGHT // 2
@@ -1037,13 +1027,11 @@ class GameView(arcade.View):
                             self.apple = Apple(safe_x, safe_y)
                             self.apple_sprite_list.clear()
                             self.apple_sprite_list.append(self.apple)
-                            # Яблоко успешно создано - сбрасываем счетчик попыток
                             self.apple_spawn_attempts = 0
                             return
             except Exception:
                 pass
 
-        # Если всё ещё не получилось, ставим None (но это не должно произойти)
         self.apple = None
         self.apple_sprite_list.clear()
 
@@ -1063,20 +1051,16 @@ class GameView(arcade.View):
 
     def lock_piece(self):
         """Фиксирует текущую фигуру на поле"""
-        # Проверяем, не раздавили ли яблоко падающей фигурой (используя collide)
         if self.apple:
             try:
                 apple_pos = self.apple.get_position()
                 piece_positions = self.current_piece.get_positions()
                 if apple_pos in piece_positions:
-                    # Яблоко раздавлено
-                    # Отнимаем 50 очков (не меньше 0)
                     apple_x, apple_y = apple_pos
                     self.score = max(0, self.score - 50)
                     self.max_score = max(self.max_score, self.score)  # Обновляем максимальный счёт
                     self.check_and_update_high_score()  # Проверяем и обновляем рекорд
                     self.add_score_message(-50, apple_x, apple_y)
-                    # Частицы при раздавливании яблока
                     try:
                         pixel_x = MARGIN + apple_x * CELL_SIZE + CELL_SIZE // 2
                         pixel_y = MARGIN + apple_y * CELL_SIZE + CELL_SIZE // 2
@@ -1088,23 +1072,19 @@ class GameView(arcade.View):
                     self.apple_sprite_list.clear()
                     self.spawn_apple()
             except Exception:
-                # Если ошибка при проверке яблока, пересоздаём его
                 self.apple = None
                 self.apple_sprite_list.clear()
                 self.spawn_apple()
 
-        # Создаем спрайты для блоков и добавляем в список для collide
         for dx, dy in self.current_piece.get_shape():
             x = self.current_piece.get_x() + dx
             y = self.current_piece.get_y() + dy
 
             if 0 <= y < GRID_HEIGHT and 0 <= x < GRID_WIDTH:
                 self.grid[y][x] = self.current_piece.get_color()
-                # Создаем спрайт блока
                 block_sprite = BlockSprite(
                     x, y, self.current_piece.get_color())
                 self.block_sprites.append(block_sprite)
-                # Анимация появления
                 pixel_x = MARGIN + x * CELL_SIZE + CELL_SIZE // 2
                 pixel_y = MARGIN + y * CELL_SIZE + CELL_SIZE // 2
                 self.particle_system.add_explosion(
@@ -1113,17 +1093,13 @@ class GameView(arcade.View):
         self.clear_lines()
         self.clear_columns()
 
-        # Увеличиваем счетчик фигур и постепенно ускоряем падение
         self.pieces_count += 1
-        # Очень медленное ускорение: каждые 10 фигур уменьшаем fall_speed на 0.001
-        # Минимальная скорость - 0.05 (максимальное ускорение)
         speed_reduction = (self.pieces_count // 10) * 0.001
         self.fall_speed = max(0.03, self.base_fall_speed - speed_reduction)
 
         self.spawn_new_piece()
 
         if not self.is_valid_position(self.current_piece):
-            # Игра окончена - поле переполнено
             self.game_over()
 
     def clear_lines(self):
@@ -1132,7 +1108,6 @@ class GameView(arcade.View):
         y = GRID_HEIGHT - 1
         cleared_rows = []
 
-        # Сначала находим все заполненные линии
         while y >= 0:
             if all(self.grid[y][x] is not None for x in range(GRID_WIDTH)):
                 # Собираем цвет для частиц
@@ -1142,9 +1117,7 @@ class GameView(arcade.View):
                 lines_cleared += 1
             y -= 1
 
-        # Если есть линии для удаления
         if lines_cleared > 0:
-            # Удаляем заполненные линии и сдвигаем блоки вниз
             cleared_row_indices = []
             y = GRID_HEIGHT - 1
             while y >= 0:
