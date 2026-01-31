@@ -3,6 +3,7 @@ import arcade
 import json
 import os
 from constants import SCREEN_WIDTH, SCREEN_HEIGHT
+from record_service import fetch_record_async
 
 HIGH_SCORE_FILE = "high_score.json"
 SETTINGS_FILE = "settings.json"
@@ -104,6 +105,10 @@ class MainMenuView(arcade.View):
 
         # Загружаем рекорд
         self.high_score = load_high_score()
+        self._remote_loaded = False
+
+        # Пробуем подтянуть рекорд с сервера (не блокируя меню)
+        self._try_load_remote_record()
 
         # Создаем кнопки выбора сложности
         button_y_start = SCREEN_HEIGHT // 2 + 40
@@ -141,6 +146,37 @@ class MainMenuView(arcade.View):
             (100, 100, 150),
             (130, 130, 200)
         )
+
+    def _try_load_remote_record(self):
+        """Пытается получить рекорд с сервера в фоне и обновить отображение.
+        Если серверный рекорд загрузился - используем его (приоритет серверу).
+        Если не загрузился - используем локальный."""
+
+        def _on_result(remote_record):
+            try:
+                # Проверяем, что серверный рекорд был успешно получен
+                if remote_record is not None and isinstance(remote_record, int) and remote_record >= 0:
+                    # Используем серверный рекорд (приоритет серверу)
+                    # Это источник истины, даже если он меньше локального
+                    self.high_score = remote_record
+                    # Сохраняем в локальный файл как кэш
+                    try:
+                        with open(HIGH_SCORE_FILE, 'w', encoding='utf-8') as f:
+                            json.dump({'high_score': self.high_score}, f, ensure_ascii=False)
+                    except Exception:
+                        pass
+                self._remote_loaded = True
+            except Exception:
+                # Если ошибка - оставляем локальный рекорд (уже загружен в self.high_score)
+                self._remote_loaded = True  # Помечаем, что попытка была сделана
+                pass
+
+        try:
+            fetch_record_async(_on_result)
+        except Exception:
+            # Если не удалось запустить запрос - используем локальный рекорд
+            self._remote_loaded = True  # Помечаем, что попытка была сделана
+            pass
 
     def on_draw(self):
         """Отрисовка меню"""
